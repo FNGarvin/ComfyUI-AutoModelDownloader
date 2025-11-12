@@ -122,16 +122,45 @@ async def download_file(url, output_path, download_id):
 
         timeout = aiohttp.ClientTimeout(total=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Get file size
-            async with session.head(url) as response:
-                if response.status not in [200, 302]:
-                    raise Exception(f"HTTP {response.status}")
+            # Get file size - try HEAD first, then fall back to GET with Range
+            total_size = 0
+            supports_range = False
 
-                total_size = int(response.headers.get('content-length', 0))
-                supports_range = response.headers.get('accept-ranges') == 'bytes'
+            try:
+                # Try HEAD request first
+                async with session.head(url, allow_redirects=True) as response:
+                    if response.status == 200:
+                        total_size = int(response.headers.get('content-length', 0))
+                        supports_range = response.headers.get('accept-ranges') == 'bytes'
+            except Exception as e:
+                logging.warning(f"HEAD request failed for {download_id}: {e}")
+
+            # If HEAD didn't give us the size, try GET with Range header
+            if total_size == 0:
+                logging.info(f"HEAD request didn't return size, trying GET with Range for {download_id}")
+                try:
+                    headers = {'Range': 'bytes=0-0'}
+                    async with session.get(url, headers=headers, allow_redirects=True) as response:
+                        if response.status in [200, 206]:
+                            # Try to get size from Content-Range header first
+                            content_range = response.headers.get('content-range', '')
+                            if content_range:
+                                # Format: "bytes 0-0/12345" where 12345 is total size
+                                parts = content_range.split('/')
+                                if len(parts) == 2:
+                                    total_size = int(parts[1])
+                                    supports_range = True
+
+                            # Fallback to Content-Length
+                            if total_size == 0:
+                                total_size = int(response.headers.get('content-length', 0))
+                except Exception as e:
+                    logging.warning(f"GET with Range failed for {download_id}: {e}")
 
             if total_size == 0:
-                raise Exception("Could not determine file size")
+                raise Exception("Could not determine file size from server")
+
+            logging.info(f"File size for {download_id}: {total_size} bytes, supports range: {supports_range}")
 
             # Create file with full size
             with open(output_path, 'wb') as f:
@@ -430,7 +459,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
