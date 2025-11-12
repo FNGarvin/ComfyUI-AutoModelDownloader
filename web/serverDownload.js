@@ -2,8 +2,8 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 // ComfyUI RunpodDirect Extension
-// Version: 1.0.0
-console.log('[RunpodDirect] v1.0.0');
+// Version: 1.0.1
+console.log('[RunpodDirect] v1.0.1');
 
 // Track download states
 const downloadStates = new Map();
@@ -285,10 +285,10 @@ function createProgressArea(listbox) {
                 </button>
             </div>
         </div>
-        <div id="server-download-current-file" style="margin-bottom: 8px; font-size: 13px; color: var(--p-text-color);"></div>
-        <div id="server-download-overall-progress" style="margin-bottom: 8px; font-size: 12px; color: var(--p-text-muted-color);"></div>
-        <div style="width: 100%; height: 8px; background: #2a2a2a; border-radius: 4px; overflow: hidden; margin-bottom: 8px;">
-            <div id="server-download-progress-bar" style="height: 100%; background: linear-gradient(90deg, #2196F3, #21CBF3); width: 0%; transition: width 0.3s;"></div>
+        <div id="server-download-current-file" style="margin-bottom: 8px; font-size: 13px; color: var(--p-text-color);">Waiting to start...</div>
+        <div id="server-download-overall-progress" style="margin-bottom: 8px; font-size: 12px; color: var(--p-text-muted-color);">Overall: 0/0 models completed</div>
+        <div style="width: 100%; height: 10px; background: rgba(0,0,0,0.3); border-radius: 5px; overflow: hidden; margin-bottom: 8px; border: 1px solid rgba(255,255,255,0.1);">
+            <div id="server-download-progress-bar" style="height: 100%; background: linear-gradient(90deg, #2196F3, #21CBF3); width: 0%; transition: width 0.3s; min-width: 0;"></div>
         </div>
         <div id="server-download-speed-info" style="display: flex; justify-content: space-between; font-size: 12px; color: var(--p-text-muted-color);">
             <span id="server-download-speed">Speed: --</span>
@@ -297,6 +297,12 @@ function createProgressArea(listbox) {
     `;
 
     listbox.parentElement.appendChild(progressArea);
+
+    // Initialize progress bar to 0%
+    const progressBarInit = document.getElementById('server-download-progress-bar');
+    if (progressBarInit) {
+        progressBarInit.style.width = '0%';
+    }
 
     // Setup button handlers
     let currentDownloadId = null;
@@ -354,8 +360,14 @@ function createProgressArea(listbox) {
             overallProgress.textContent = `Overall: ${completedDownloads}/${totalDownloads} models completed`;
         }
 
-        if (progressBar && status === 'downloading') {
-            progressBar.style.width = `${progress}%`;
+        if (progressBar) {
+            if (status === 'downloading' && progress !== undefined) {
+                progressBar.style.width = `${progress}%`;
+            } else if (status === 'completed') {
+                progressBar.style.width = '100%';
+            } else if (status === 'error' || status === 'cancelled') {
+                progressBar.style.width = '0%';
+            }
         }
 
         if (speedInfo && speed) {

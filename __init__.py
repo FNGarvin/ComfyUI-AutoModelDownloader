@@ -115,7 +115,9 @@ async def download_file(url, output_path, download_id):
         # Initialize control for this download
         download_control[download_id] = {
             "paused": False,
-            "cancelled": False
+            "cancelled": False,
+            "total_downloaded": 0,  # Shared counter for all chunks
+            "lock": asyncio.Lock()   # Lock for thread-safe updates
         }
 
         timeout = aiohttp.ClientTimeout(total=None)
@@ -137,6 +139,7 @@ async def download_file(url, output_path, download_id):
                 f.write(b'\0')
 
             active_downloads[download_id]["total"] = total_size
+            active_downloads[download_id]["downloaded"] = 0
 
             # Use multi-connection download if server supports range requests
             if supports_range and total_size > CHUNK_SIZE:
@@ -208,6 +211,7 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
     headers = {'Range': f'bytes={start}-{end}'}
     chunk_size = end - start + 1
     downloaded = 0
+    last_report_time = 0
 
     try:
         async with session.get(url, headers=headers) as response:
@@ -227,11 +231,18 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
                         return
 
                     f.write(chunk)
-                    downloaded += len(chunk)
+                    chunk_len = len(chunk)
+                    downloaded += chunk_len
 
-                    # Update progress (aggregate from all chunks)
-                    if chunk_index == 0:  # Only send updates from first chunk to avoid spam
-                        total_downloaded = start + downloaded
+                    # Update shared progress counter with lock
+                    async with download_control[download_id]["lock"]:
+                        download_control[download_id]["total_downloaded"] += chunk_len
+                        total_downloaded = download_control[download_id]["total_downloaded"]
+
+                    # Send progress updates every 100ms to avoid spam (only from chunk 0)
+                    import time
+                    current_time = time.time()
+                    if chunk_index == 0 and (current_time - last_report_time) >= 0.1:
                         progress = (total_downloaded / total_size) * 100
                         active_downloads[download_id]["progress"] = progress
                         active_downloads[download_id]["downloaded"] = total_downloaded
@@ -242,6 +253,8 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
                             "downloaded": total_downloaded,
                             "total": total_size
                         })
+
+                        last_report_time = current_time
 
     except Exception as e:
         logging.error(f"Error in chunk {chunk_index} for {download_id}: {e}")
@@ -417,7 +430,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
