@@ -2,8 +2,8 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 // ComfyUI RunpodDirect Extension
-// Version: 1.0.1
-console.log('[RunpodDirect] v1.0.1');
+// Version: 1.0.3
+console.log('[RunpodDirect] v1.0.3');
 
 // Track download states
 const downloadStates = new Map();
@@ -60,6 +60,13 @@ api.addEventListener("server_download_progress", ({ detail }) => {
 
 api.addEventListener("server_download_complete", ({ detail }) => {
     const { download_id, path, size } = detail;
+
+    // Increment counter BEFORE updating UI
+    if (isDownloadingAll) {
+        completedDownloads++;
+        console.log(`[RunpodDirect] Progress: ${completedDownloads}/${totalDownloads} completed`);
+    }
+
     downloadStates.set(download_id, {
         status: 'completed',
         progress: 100,
@@ -73,15 +80,23 @@ api.addEventListener("server_download_complete", ({ detail }) => {
 
     console.log(`Download completed: ${download_id} -> ${path}`);
 
-    // Process next in queue if downloading all
-    if (isDownloadingAll) {
-        completedDownloads++;
-        processDownloadQueue();
+    // Check if all downloads are done
+    if (isDownloadingAll && completedDownloads >= totalDownloads) {
+        console.log('[RunpodDirect] All downloads completed!');
+        isDownloadingAll = false;
+        showRefreshPrompt();
     }
 });
 
 api.addEventListener("server_download_error", ({ detail }) => {
     const { download_id, error } = detail;
+
+    // Increment counter BEFORE updating UI
+    if (isDownloadingAll) {
+        completedDownloads++;
+        console.log(`[RunpodDirect] Progress: ${completedDownloads}/${totalDownloads} completed (1 error)`);
+    }
+
     downloadStates.set(download_id, {
         status: 'error',
         error
@@ -93,16 +108,31 @@ api.addEventListener("server_download_error", ({ detail }) => {
 
     console.error(`Download error: ${download_id} - ${error}`);
 
-    // Continue with next download even if one fails
-    if (isDownloadingAll) {
-        completedDownloads++;
-        processDownloadQueue();
+    // Check if all downloads are done (including failed ones)
+    if (isDownloadingAll && completedDownloads >= totalDownloads) {
+        console.log('[RunpodDirect] All downloads completed!');
+        isDownloadingAll = false;
+        showRefreshPrompt();
     }
 });
 
 // Function to start a server download
-async function startServerDownload(url, savePath, filename) {
+async function startServerDownload(url, savePath, filename, markAsQueued = false) {
     try {
+        const download_id = `${savePath}/${filename}`;
+
+        // Mark as queued immediately if requested (for Download All)
+        if (markAsQueued) {
+            downloadStates.set(download_id, {
+                status: 'queued',
+                progress: 0
+            });
+
+            window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
+                detail: { download_id, ...downloadStates.get(download_id) }
+            }));
+        }
+
         const response = await api.fetchApi("/server_download/start", {
             method: "POST",
             headers: {
@@ -118,15 +148,17 @@ async function startServerDownload(url, savePath, filename) {
         const result = await response.json();
 
         if (response.ok) {
-            const download_id = result.download_id;
-            downloadStates.set(download_id, {
-                status: 'downloading',
-                progress: 0
-            });
+            // If not already marked as queued, set as queued now
+            if (!markAsQueued) {
+                downloadStates.set(download_id, {
+                    status: 'queued',
+                    progress: 0
+                });
 
-            window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
-                detail: { download_id, ...downloadStates.get(download_id) }
-            }));
+                window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
+                    detail: { download_id, ...downloadStates.get(download_id) }
+                }));
+            }
 
             return { success: true, download_id };
         } else {
@@ -194,24 +226,27 @@ async function cancelDownload(downloadId) {
     }
 }
 
-// Process download queue
+// Process download queue - Sends all downloads to backend which handles queue management
 async function processDownloadQueue() {
     if (downloadQueue.length === 0) {
-        // All downloads complete
-        isDownloadingAll = false;
-        console.log('[RunpodDirect] All downloads completed!');
-
-        // Show refresh prompt
-        if (completedDownloads > 0) {
-            showRefreshPrompt();
-        }
+        console.log('[RunpodDirect] No downloads in queue');
         return;
     }
 
-    const nextDownload = downloadQueue.shift();
-    console.log(`[RunpodDirect] Starting download ${completedDownloads + 1}/${totalDownloads}: ${nextDownload.filename}`);
+    // Send all downloads to the backend (backend handles queue and priorities)
+    console.log(`[RunpodDirect] Starting ${downloadQueue.length} downloads (backend will queue and prioritize)`);
 
-    await startServerDownload(nextDownload.url, nextDownload.directory, nextDownload.filename);
+    const downloadsToStart = [...downloadQueue];
+    downloadQueue = []; // Clear queue as we're sending all to backend
+
+    // Start all downloads - backend will queue and manage priorities
+    // Pass markAsQueued=true so buttons show "Queued" status immediately
+    for (const download of downloadsToStart) {
+        console.log(`[RunpodDirect] Queuing download ${download.filename}`);
+        await startServerDownload(download.url, download.directory, download.filename, true);
+    }
+
+    console.log(`[RunpodDirect] All ${downloadsToStart.length} downloads queued on backend`);
 }
 
 // Show refresh prompt
@@ -223,8 +258,15 @@ function showRefreshPrompt() {
     const dialogContent = dialog.querySelector('.p-dialog-content');
     if (!dialogContent) return;
 
+    // Check if prompt already exists
+    if (document.querySelector('.server-download-refresh-prompt')) {
+        console.log('[RunpodDirect] Refresh prompt already shown');
+        return;
+    }
+
     // Create refresh prompt
     const refreshPrompt = document.createElement('div');
+    refreshPrompt.className = 'server-download-refresh-prompt';
     refreshPrompt.style.cssText = `
         margin-top: 20px;
         padding: 16px;
@@ -249,7 +291,7 @@ function showRefreshPrompt() {
     dialogContent.appendChild(refreshPrompt);
 }
 
-// Create global progress area
+// Create global progress area with individual progress bars for each download
 function createProgressArea(listbox) {
     // Remove existing progress area if any
     const existing = document.querySelector('.server-download-progress-area');
@@ -270,133 +312,132 @@ function createProgressArea(listbox) {
             <div style="font-weight: 600; color: var(--p-text-color);">
                 Download Progress
             </div>
-            <div id="server-download-controls" style="display: flex; gap: 8px;">
-                <button id="server-download-pause-btn" class="p-button p-component p-button-sm p-button-outlined" type="button" style="display: none;">
-                    <span class="p-button-icon pi pi-pause"></span>
-                    <span class="p-button-label">Pause</span>
-                </button>
-                <button id="server-download-resume-btn" class="p-button p-component p-button-sm p-button-outlined" type="button" style="display: none;">
-                    <span class="p-button-icon pi pi-play"></span>
-                    <span class="p-button-label">Resume</span>
-                </button>
-                <button id="server-download-cancel-btn" class="p-button p-component p-button-sm p-button-outlined p-button-danger" type="button" style="display: none;">
-                    <span class="p-button-icon pi pi-times"></span>
-                    <span class="p-button-label">Cancel</span>
-                </button>
-            </div>
         </div>
-        <div id="server-download-current-file" style="margin-bottom: 8px; font-size: 13px; color: var(--p-text-color);">Waiting to start...</div>
-        <div id="server-download-overall-progress" style="margin-bottom: 8px; font-size: 12px; color: var(--p-text-muted-color);">Overall: 0/0 models completed</div>
-        <div style="width: 100%; height: 10px; background: rgba(0,0,0,0.3); border-radius: 5px; overflow: hidden; margin-bottom: 8px; border: 1px solid rgba(255,255,255,0.1);">
-            <div id="server-download-progress-bar" style="height: 100%; background: linear-gradient(90deg, #2196F3, #21CBF3); width: 0%; transition: width 0.3s; min-width: 0;"></div>
+        <div id="server-download-overall-progress" style="margin-bottom: 12px; font-size: 13px; color: var(--p-text-muted-color);">
+            Overall: 0/${totalDownloads} models completed
         </div>
-        <div id="server-download-speed-info" style="display: flex; justify-content: space-between; font-size: 12px; color: var(--p-text-muted-color);">
-            <span id="server-download-speed">Speed: --</span>
-            <span id="server-download-size">Size: --</span>
+        <div id="server-download-items-container" style="display: flex; flex-direction: column; gap: 12px;">
+            <!-- Individual download progress items will be added here -->
         </div>
     `;
 
     listbox.parentElement.appendChild(progressArea);
 
-    // Initialize progress bar to 0%
-    const progressBarInit = document.getElementById('server-download-progress-bar');
-    if (progressBarInit) {
-        progressBarInit.style.width = '0%';
-    }
-
-    // Setup button handlers
-    let currentDownloadId = null;
-
-    const pauseBtn = document.getElementById('server-download-pause-btn');
-    const resumeBtn = document.getElementById('server-download-resume-btn');
-    const cancelBtn = document.getElementById('server-download-cancel-btn');
-
-    if (pauseBtn) {
-        pauseBtn.onclick = async () => {
-            if (currentDownloadId) {
-                await pauseDownload(currentDownloadId);
-            }
-        };
-    }
-
-    if (resumeBtn) {
-        resumeBtn.onclick = async () => {
-            if (currentDownloadId) {
-                await resumeDownload(currentDownloadId);
-            }
-        };
-    }
-
-    if (cancelBtn) {
-        cancelBtn.onclick = async () => {
-            if (currentDownloadId && confirm('Are you sure you want to cancel this download?')) {
-                await cancelDownload(currentDownloadId);
-                // Clear queue
-                downloadQueue = [];
-                isDownloadingAll = false;
-            }
-        };
-    }
-
     // Listen for updates
     const updateHandler = (event) => {
         const { download_id, status, progress, downloaded, total, speed } = event.detail;
 
-        if (!isDownloadingAll) return;
-
-        currentDownloadId = download_id;
-
-        const currentFile = document.getElementById('server-download-current-file');
-        const overallProgress = document.getElementById('server-download-overall-progress');
-        const progressBar = document.getElementById('server-download-progress-bar');
-        const speedInfo = document.getElementById('server-download-speed');
-        const sizeInfo = document.getElementById('server-download-size');
-
-        if (currentFile) {
-            currentFile.textContent = `Current: ${download_id}`;
+        if (!isDownloadingAll) {
+            return;
         }
 
+        // Update overall progress
+        const overallProgress = document.getElementById('server-download-overall-progress');
         if (overallProgress) {
             overallProgress.textContent = `Overall: ${completedDownloads}/${totalDownloads} models completed`;
         }
 
-        if (progressBar) {
-            if (status === 'downloading' && progress !== undefined) {
-                progressBar.style.width = `${progress}%`;
-            } else if (status === 'completed') {
-                progressBar.style.width = '100%';
-            } else if (status === 'error' || status === 'cancelled') {
-                progressBar.style.width = '0%';
-            }
-        }
-
-        if (speedInfo && speed) {
-            speedInfo.textContent = `Speed: ${speed}`;
-        }
-
-        if (sizeInfo && downloaded && total) {
-            sizeInfo.textContent = `Size: ${formatBytes(downloaded)} / ${formatBytes(total)}`;
-        }
-
-        // Update button visibility based on status
-        if (pauseBtn && resumeBtn && cancelBtn) {
-            if (status === 'downloading') {
-                pauseBtn.style.display = 'inline-flex';
-                resumeBtn.style.display = 'none';
-                cancelBtn.style.display = 'inline-flex';
-            } else if (status === 'paused') {
-                pauseBtn.style.display = 'none';
-                resumeBtn.style.display = 'inline-flex';
-                cancelBtn.style.display = 'inline-flex';
-            } else {
-                pauseBtn.style.display = 'none';
-                resumeBtn.style.display = 'none';
-                cancelBtn.style.display = 'none';
-            }
-        }
+        // Update or create individual progress item
+        updateDownloadProgressItem(download_id, status, progress, downloaded, total, speed);
     };
 
     window.addEventListener('serverDownloadUpdate', updateHandler);
+}
+
+// Update or create a progress item for a specific download
+function updateDownloadProgressItem(download_id, status, progress, downloaded, total, speed) {
+    // Declare variables at function scope so they're accessible across try blocks
+    let item = null;
+    let container = null;
+    const itemId = `download-item-${download_id.replace(/\//g, '-')}`;
+
+    try {
+        container = document.getElementById('server-download-items-container');
+        if (!container) return;
+
+        item = document.getElementById(itemId);
+
+        // Don't show queued items
+        if (status === 'queued') {
+            if (item) item.remove();
+            return;
+        }
+
+        // Remove completed/error items after a delay
+        if (status === 'completed' || status === 'error') {
+            if (item && !item.dataset.removing) {
+                item.dataset.removing = 'true';
+                setTimeout(() => {
+                    try {
+                        if (item && item.parentNode) item.remove();
+                    } catch (e) {
+                        console.error('[RunpodDirect] Error removing progress item:', e);
+                    }
+                }, 2000);
+            }
+        }
+
+        // Create new item if it doesn't exist
+        if (!item) {
+            item = document.createElement('div');
+            item.id = itemId;
+            item.style.cssText = `
+                padding: 12px;
+                background: rgba(255, 255, 255, 0.05);
+                border-radius: 6px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            `;
+            container.appendChild(item);
+        }
+    } catch (e) {
+        console.error('[RunpodDirect] Error in updateDownloadProgressItem:', e);
+        return;
+    }
+
+    try {
+        // Status icon and color (no priority badge needed - downloading one at a time)
+        let statusIcon = '';
+        let statusColor = '#2196F3';
+        if (status === 'downloading') {
+            statusIcon = '<i class="pi pi-spin pi-spinner" style="margin-right: 6px;"></i>';
+            statusColor = '#2196F3';
+        } else if (status === 'completed') {
+            statusIcon = '<i class="pi pi-check-circle" style="margin-right: 6px;"></i>';
+            statusColor = '#4CAF50';
+        } else if (status === 'error') {
+            statusIcon = '<i class="pi pi-times-circle" style="margin-right: 6px;"></i>';
+            statusColor = '#ef4444';
+        } else if (status === 'paused') {
+            statusIcon = '<i class="pi pi-pause" style="margin-right: 6px;"></i>';
+            statusColor = '#FF9800';
+        }
+
+        const progressPercent = progress || 0;
+        const speedText = speed || '--';
+        const sizeText = downloaded && total ? `${formatBytes(downloaded)} / ${formatBytes(total)}` : '--';
+
+        if (item) {
+            item.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <div style="font-size: 13px; color: ${statusColor}; font-weight: 500; display: flex; align-items: center;">
+                        ${statusIcon}${download_id}
+                    </div>
+                    <div style="font-size: 12px; color: var(--p-text-muted-color);">
+                        ${progressPercent.toFixed(1)}%
+                    </div>
+                </div>
+                <div style="width: 100%; height: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden; margin-bottom: 6px; border: 1px solid rgba(255,255,255,0.1);">
+                    <div style="height: 100%; background: linear-gradient(90deg, ${statusColor}, ${statusColor}aa); width: ${progressPercent}%; transition: width 0.3s;"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--p-text-muted-color);">
+                    <span>Speed: ${speedText}</span>
+                    <span>${sizeText}</span>
+                </div>
+            `;
+        }
+    } catch (e) {
+        console.error('[RunpodDirect] Error updating progress item HTML:', e);
+    }
 }
 
 // Export functions for use in other modules
@@ -602,9 +643,10 @@ function injectServerDownloadButtons() {
             const result = await startServerDownload(url, directory, filename);
 
             if (result.success) {
-                btnLabel.textContent = 'Downloading';
-                statusIcon.className = 'pi pi-spin pi-spinner';
+                btnLabel.textContent = 'Queued';
+                statusIcon.className = 'pi pi-clock';
                 statusIcon.style.display = 'inline';
+                statusIcon.style.color = '#FF9800';
             } else {
                 btnLabel.textContent = 'Error';
                 statusIcon.className = 'pi pi-times-circle';
@@ -619,7 +661,14 @@ function injectServerDownloadButtons() {
             if (event.detail.download_id === download_id) {
                 const { status, error } = event.detail;
 
-                if (status === 'downloading') {
+                if (status === 'queued') {
+                    serverDownloadBtn.disabled = true;
+                    btnLabel.textContent = 'Queued';
+                    statusIcon.className = 'pi pi-clock';
+                    statusIcon.style.display = 'inline';
+                    statusIcon.style.color = '#FF9800';
+                } else if (status === 'downloading') {
+                    serverDownloadBtn.disabled = true;
                     btnLabel.textContent = 'Downloading';
                     statusIcon.className = 'pi pi-spin pi-spinner';
                     statusIcon.style.display = 'inline';

@@ -14,10 +14,13 @@ from server import PromptServer
 active_downloads = {}
 # Download control (for pause/resume)
 download_control = {}
+# Download queue management
+download_queue = []
+current_download_task = None  # Only one download at a time
 
-# Configuration
-CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks for faster downloads
-NUM_CONNECTIONS = 4  # Number of parallel connections per file
+# Configuration optimized for datacenter connections (RunPod)
+CHUNK_SIZE = 32 * 1024 * 1024  # 32MB chunks - balanced for 500MB to 30GB+ files
+NUM_CONNECTIONS = 8  # 8 parallel connections - optimal for DC bandwidth
 
 
 @PromptServer.instance.routes.post("/server_download/start")
@@ -56,7 +59,7 @@ async def start_download(request):
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        # Mark as downloading
+        # Mark as queued
         download_id = f"{save_path}/{filename}"
         active_downloads[download_id] = {
             "url": url,
@@ -64,17 +67,24 @@ async def start_download(request):
             "save_path": save_path,
             "output_path": output_path,
             "progress": 0,
-            "status": "downloading"
+            "status": "queued",
+            "priority": None
         }
 
-        # Start download in background
-        import asyncio
-        asyncio.create_task(download_file(url, output_path, download_id))
+        # Add to queue
+        download_queue.append({
+            "download_id": download_id,
+            "url": url,
+            "output_path": output_path
+        })
+
+        # Process queue (will start download if slot available)
+        asyncio.create_task(process_download_queue())
 
         return web.json_response({
             "success": True,
             "download_id": download_id,
-            "message": "Download started"
+            "message": "Download queued"
         })
 
     except Exception as e:
@@ -83,6 +93,58 @@ async def start_download(request):
             {"error": str(e)},
             status=500
         )
+
+
+async def process_download_queue():
+    """Process the download queue - one download at a time"""
+    global download_queue, current_download_task
+
+    # Check if already downloading
+    if current_download_task is not None and not current_download_task.done():
+        logging.info("[RunpodDirect] Download already in progress, waiting...")
+        return  # Already downloading
+
+    if len(download_queue) == 0:
+        logging.info("[RunpodDirect] Queue is empty")
+        return  # Nothing to process
+
+    # Get next download from queue
+    download_item = download_queue.pop(0)
+    download_id = download_item["download_id"]
+    url = download_item["url"]
+    output_path = download_item["output_path"]
+
+    # Set status to downloading
+    active_downloads[download_id]["status"] = "downloading"
+    active_downloads[download_id]["progress"] = 0
+    active_downloads[download_id]["downloaded"] = 0
+
+    logging.info(f"[RunpodDirect] Starting download {download_id} with {NUM_CONNECTIONS} connections (full speed)")
+
+    # Notify frontend that download is starting
+    await PromptServer.instance.send("server_download_progress", {
+        "download_id": download_id,
+        "progress": 0,
+        "downloaded": 0,
+        "total": 0
+    })
+
+    # Start download task
+    current_download_task = asyncio.create_task(download_file(url, output_path, download_id))
+
+    # Add completion callback to process next in queue
+    current_download_task.add_done_callback(lambda t: on_download_complete(download_id))
+
+
+def on_download_complete(download_id):
+    """Called when a download completes - processes next in queue"""
+    global current_download_task
+
+    current_download_task = None
+    logging.info(f"[RunpodDirect] Download completed: {download_id}, processing next in queue...")
+
+    # Process next in queue
+    asyncio.create_task(process_download_queue())
 
 
 async def download_chunk(session, url, start, end, output_path, chunk_index, download_id):
@@ -110,6 +172,8 @@ async def download_chunk(session, url, start, end, output_path, chunk_index, dow
 async def download_file(url, output_path, download_id):
     """Download file with multi-connection support and progress tracking"""
     import aiohttp
+
+    logging.info(f"[RunpodDirect] Download {download_id} using {NUM_CONNECTIONS} connections (full speed)")
 
     try:
         # Initialize control for this download
@@ -411,6 +475,8 @@ async def resume_download(request):
 @PromptServer.instance.routes.post("/server_download/cancel")
 async def cancel_download(request):
     """Cancel an active download"""
+    global download_queue, current_download_task
+
     try:
         json_data = await request.json()
         download_id = json_data.get("download_id")
@@ -421,14 +487,16 @@ async def cancel_download(request):
                 status=400
             )
 
-        if download_id not in download_control:
-            return web.json_response(
-                {"error": "Download not found or already completed"},
-                status=404
-            )
+        # Check if download is queued (not started yet)
+        download_queue[:] = [d for d in download_queue if d["download_id"] != download_id]
 
-        download_control[download_id]["cancelled"] = True
-        active_downloads[download_id]["status"] = "cancelled"
+        # Check if download is active
+        if download_id in download_control:
+            download_control[download_id]["cancelled"] = True
+
+        # Update status
+        if download_id in active_downloads:
+            active_downloads[download_id]["status"] = "cancelled"
 
         await PromptServer.instance.send("server_download_cancelled", {
             "download_id": download_id
@@ -459,7 +527,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
