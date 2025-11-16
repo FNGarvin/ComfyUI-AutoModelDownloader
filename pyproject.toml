@@ -1,17 +1,36 @@
 [project]
-name = "comfyui-runpoddirect" # Unique identifier for your node. Immutable after creation.
-description = "Server-side model download extension for ComfyUI on RunPod - Download missing models directly to your pod with multi-connection downloads, queue management, and real-time progress tracking"
-version = "1.0.2" # Custom Node version. Must be semantically versioned.
-license = { file = "LICENSE" }
+name = "comfyui-runpoddirect"
+description = "Server-side model download extension for ComfyUI on Runpod - Download missing models directly to your pod with multi-connection downloads, queue management, and real-time progress tracking"
+version = "1.0.2"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Madiator2011"},
+]
+readme = "README.md"
+requires-python = ">=3.8"
 dependencies = [
     "aiohttp>=3.8.0",
 ]
 
+classifiers = [
+    # OS independent - works on all operating systems
+    "Operating System :: OS Independent",
+
+    # GPU support - works with any GPU accelerator
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Environment :: GPU :: AMD ROCm",
+    "Environment :: GPU :: Intel Arc",
+    "Environment :: GPU :: Apple Metal",
+]
+
 [project.urls]
 Repository = "https://github.com/MadiatorLabs/ComfyUI-RunpodDirect"
+Documentation = "https://github.com/MadiatorLabs/ComfyUI-RunpodDirect#readme"
+"Bug Tracker" = "https://github.com/MadiatorLabs/ComfyUI-RunpodDirect/issues"
 
 [tool.comfy]
-PublisherId = "MadiatorLabs" # Publisher ID from Comfy Registry Website
-DisplayName = "RunpodDirect" # Display name for the Custom Node
-Icon = "" # Optional: SVG, PNG, JPG or GIF (MAX. 800x400px)
+PublisherId = "madiator2011"
+DisplayName = "Madiator2011"
+Icon = ""
+includes = []
 
