@@ -2,8 +2,8 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 // ComfyUI RunpodDirect Extension
-// Version: 1.0.5
-console.log('[RunpodDirect] v1.0.5');
+// Version: 1.0.6
+console.log('[RunpodDirect] v1.0.6');
 
 // Track download states
 const downloadStates = new Map();

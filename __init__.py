@@ -45,9 +45,41 @@ async def start_download(request):
                 status=400
             )
 
+        # Security: Validate filename to prevent path traversal attacks
+        # Check for any directory separators (both Unix and Windows style)
+        if "/" in filename or "\\" in filename or os.path.sep in filename:
+            return web.json_response(
+                {"error": "Invalid filename: must not contain path separators"},
+                status=400
+            )
+
+        # Additional check for various path traversal patterns
+        if ".." in filename or filename.startswith("/") or filename.startswith("~"):
+            return web.json_response(
+                {"error": "Invalid filename: path traversal patterns detected"},
+                status=400
+            )
+
+        # Normalize the filename to remove any potential tricks
+        safe_filename = os.path.basename(filename)
+        if safe_filename != filename:
+            return web.json_response(
+                {"error": "Invalid filename: must be a simple filename without path components"},
+                status=400
+            )
+
         # Get the first folder path for this model type
         output_dir = folder_paths.folder_names_and_paths[save_path][0][0]
-        output_path = os.path.join(output_dir, filename)
+        output_path = os.path.join(output_dir, safe_filename)
+
+        # Final security check: ensure the resolved path is within the intended directory
+        output_path = os.path.abspath(output_path)
+        output_dir = os.path.abspath(output_dir)
+        if not output_path.startswith(output_dir + os.sep):
+            return web.json_response(
+                {"error": "Security error: attempted directory escape"},
+                status=400
+            )
 
         # Check if file already exists
         if os.path.exists(output_path):
@@ -60,10 +92,10 @@ async def start_download(request):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         # Mark as queued
-        download_id = f"{save_path}/{filename}"
+        download_id = f"{save_path}/{safe_filename}"
         active_downloads[download_id] = {
             "url": url,
-            "filename": filename,
+            "filename": safe_filename,
             "save_path": save_path,
             "output_path": output_path,
             "progress": 0,
@@ -527,7 +559,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
