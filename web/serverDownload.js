@@ -1,9 +1,9 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-// ComfyUI RunpodDirect Extension
+// ComfyUI.AutoModelDownloader Extension
 // Version: 1.0.6
-console.log('[RunpodDirect] v1.0.6');
+console.log('[AutoModelDownloader] v1.0.6');
 
 // Track download states
 const downloadStates = new Map();
@@ -64,7 +64,7 @@ api.addEventListener("server_download_complete", ({ detail }) => {
     // Increment counter BEFORE updating UI
     if (isDownloadingAll) {
         completedDownloads++;
-        console.log(`[RunpodDirect] Progress: ${completedDownloads}/${totalDownloads} completed`);
+        console.log(`[AutoModelDownloader] Progress: ${completedDownloads}/${totalDownloads} completed`);
     }
 
     downloadStates.set(download_id, {
@@ -82,7 +82,7 @@ api.addEventListener("server_download_complete", ({ detail }) => {
 
     // Check if all downloads are done
     if (isDownloadingAll && completedDownloads >= totalDownloads) {
-        console.log('[RunpodDirect] All downloads completed!');
+        console.log('[AutoModelDownloader] All downloads completed!');
         isDownloadingAll = false;
         showRefreshPrompt();
     }
@@ -94,7 +94,7 @@ api.addEventListener("server_download_error", ({ detail }) => {
     // Increment counter BEFORE updating UI
     if (isDownloadingAll) {
         completedDownloads++;
-        console.log(`[RunpodDirect] Progress: ${completedDownloads}/${totalDownloads} completed (1 error)`);
+        console.log(`[AutoModelDownloader] Progress: ${completedDownloads}/${totalDownloads} completed (1 error)`);
     }
 
     downloadStates.set(download_id, {
@@ -110,7 +110,7 @@ api.addEventListener("server_download_error", ({ detail }) => {
 
     // Check if all downloads are done (including failed ones)
     if (isDownloadingAll && completedDownloads >= totalDownloads) {
-        console.log('[RunpodDirect] All downloads completed!');
+        console.log('[AutoModelDownloader] All downloads completed!');
         isDownloadingAll = false;
         showRefreshPrompt();
     }
@@ -229,12 +229,12 @@ async function cancelDownload(downloadId) {
 // Process download queue - Sends all downloads to backend which handles queue management
 async function processDownloadQueue() {
     if (downloadQueue.length === 0) {
-        console.log('[RunpodDirect] No downloads in queue');
+        console.log('[AutoModelDownloader] No downloads in queue');
         return;
     }
 
     // Send all downloads to the backend (backend handles queue and priorities)
-    console.log(`[RunpodDirect] Starting ${downloadQueue.length} downloads (backend will queue and prioritize)`);
+    console.log(`[AutoModelDownloader] Starting ${downloadQueue.length} downloads (backend will queue and prioritize)`);
 
     const downloadsToStart = [...downloadQueue];
     downloadQueue = []; // Clear queue as we're sending all to backend
@@ -242,11 +242,11 @@ async function processDownloadQueue() {
     // Start all downloads - backend will queue and manage priorities
     // Pass markAsQueued=true so buttons show "Queued" status immediately
     for (const download of downloadsToStart) {
-        console.log(`[RunpodDirect] Queuing download ${download.filename}`);
+        console.log(`[AutoModelDownloader] Queuing download ${download.filename}`);
         await startServerDownload(download.url, download.directory, download.filename, true);
     }
 
-    console.log(`[RunpodDirect] All ${downloadsToStart.length} downloads queued on backend`);
+    console.log(`[AutoModelDownloader] All ${downloadsToStart.length} downloads queued on backend`);
 }
 
 // Show refresh prompt
@@ -260,7 +260,7 @@ function showRefreshPrompt() {
 
     // Check if prompt already exists
     if (document.querySelector('.server-download-refresh-prompt')) {
-        console.log('[RunpodDirect] Refresh prompt already shown');
+        console.log('[AutoModelDownloader] Refresh prompt already shown');
         return;
     }
 
@@ -371,7 +371,7 @@ function updateDownloadProgressItem(download_id, status, progress, downloaded, t
                     try {
                         if (item && item.parentNode) item.remove();
                     } catch (e) {
-                        console.error('[RunpodDirect] Error removing progress item:', e);
+                        console.error('[AutoModelDownloader] Error removing progress item:', e);
                     }
                 }, 2000);
             }
@@ -390,7 +390,7 @@ function updateDownloadProgressItem(download_id, status, progress, downloaded, t
             container.appendChild(item);
         }
     } catch (e) {
-        console.error('[RunpodDirect] Error in updateDownloadProgressItem:', e);
+        console.error('[AutoModelDownloader] Error in updateDownloadProgressItem:', e);
         return;
     }
 
@@ -436,7 +436,7 @@ function updateDownloadProgressItem(download_id, status, progress, downloaded, t
             `;
         }
     } catch (e) {
-        console.error('[RunpodDirect] Error updating progress item HTML:', e);
+        console.error('[AutoModelDownloader] Error updating progress item HTML:', e);
     }
 }
 
@@ -449,7 +449,7 @@ window.serverDownload = {
 
 // Helper to inject buttons using MutationObserver
 function setupDialogObserver() {
-    console.log('[RunpodDirect] Setting up dialog observer');
+    console.log('[AutoModelDownloader] Setting up dialog observer');
 
     // Watch for the missing models dialog to appear
     const observer = new MutationObserver((mutations) => {
@@ -464,7 +464,7 @@ function setupDialogObserver() {
                         );
 
                         if (hasDialog) {
-                            console.log('[RunpodDirect] Detected missing models dialog, injecting buttons...');
+                            console.log('[AutoModelDownloader] Detected missing models dialog, injecting buttons...');
                             setTimeout(() => {
                                 injectServerDownloadButtons();
                             }, 500);
@@ -481,32 +481,32 @@ function setupDialogObserver() {
         subtree: true
     });
 
-    console.log('[RunpodDirect] Observer active');
+    console.log('[AutoModelDownloader] Observer active');
 }
 
 function injectServerDownloadButtons() {
-    console.log('[RunpodDirect] injectServerDownloadButtons called');
+    console.log('[AutoModelDownloader] injectServerDownloadButtons called');
 
     // Find the missing models listbox
     const listbox = document.querySelector('.comfy-missing-models');
     if (!listbox) {
-        console.log('[RunpodDirect] Missing models listbox not found');
+        console.log('[AutoModelDownloader] Missing models listbox not found');
         return;
     }
 
-    console.log('[RunpodDirect] Found .comfy-missing-models listbox');
+    console.log('[AutoModelDownloader] Found .comfy-missing-models listbox');
 
     // Check if we already added our UI
     if (document.querySelector('.server-download-all-btn')) {
-        console.log('[RunpodDirect] Buttons already injected');
+        console.log('[AutoModelDownloader] Buttons already injected');
         return;
     }
 
     const listItems = listbox.querySelectorAll('.p-listbox-option');
-    console.log(`[RunpodDirect] Found ${listItems.length} list items`);
+    console.log(`[AutoModelDownloader] Found ${listItems.length} list items`);
 
     if (listItems.length === 0) {
-        console.log('[RunpodDirect] No list items found');
+        console.log('[AutoModelDownloader] No list items found');
         return;
     }
 
@@ -521,7 +521,7 @@ function injectServerDownloadButtons() {
 
     const downloadAllLabel = document.createElement('span');
     downloadAllLabel.className = 'p-button-label';
-    downloadAllLabel.textContent = `Download All Models to Pod (${listItems.length})`;
+    downloadAllLabel.textContent = `Download All Models (${listItems.length})`;
     downloadAllBtn.appendChild(downloadAllLabel);
 
     downloadAllBtn.onclick = async (e) => {
@@ -566,11 +566,11 @@ function injectServerDownloadButtons() {
     listbox.parentElement.insertBefore(downloadAllContainer, listbox);
 
     listItems.forEach((item, index) => {
-        console.log(`[RunpodDirect] Processing item ${index + 1}`);
+        console.log(`[AutoModelDownloader] Processing item ${index + 1}`);
 
         // Check if we already added the button
         if (item.querySelector('.server-download-btn')) {
-            console.log(`[RunpodDirect] Item ${index + 1} already has server download button, skipping`);
+            console.log(`[AutoModelDownloader] Item ${index + 1} already has server download button, skipping`);
             return;
         }
 
@@ -586,11 +586,11 @@ function injectServerDownloadButtons() {
         // Find the main flex container
         const mainContainer = item.querySelector('.flex.flex-row.items-center.gap-2');
         if (!mainContainer) {
-            console.log('[RunpodDirect] Main flex container not found');
+            console.log('[AutoModelDownloader] Main flex container not found');
             return;
         }
 
-        console.log('[RunpodDirect] Found main container');
+        console.log('[AutoModelDownloader] Found main container');
 
         // We'll create a new div for our button (following the same pattern)
         const buttonWrapper = document.createElement('div');
@@ -598,25 +598,25 @@ function injectServerDownloadButtons() {
         // Get model info from the item
         const labelElement = item.querySelector('[title]');
         if (!labelElement) {
-            console.log('[RunpodDirect] No title element found');
+            console.log('[AutoModelDownloader] No title element found');
             return;
         }
 
         const label = labelElement.textContent.trim();
         const url = labelElement.getAttribute('title');
-        console.log(`[RunpodDirect] Model: ${label}, URL: ${url}`);
+        console.log(`[AutoModelDownloader] Model: ${label}, URL: ${url}`);
 
         // Parse "checkpoints / model.safetensors" format
         const parts = label.split('/').map(p => p.trim());
         if (parts.length !== 2) {
-            console.log(`[RunpodDirect] Could not parse label format: ${label}`);
+            console.log(`[AutoModelDownloader] Could not parse label format: ${label}`);
             return;
         }
 
         const directory = parts[0];
         const filename = parts[1];
         const download_id = `${directory}/${filename}`;
-        console.log(`[RunpodDirect] Creating button for ${download_id}`);
+        console.log(`[AutoModelDownloader] Creating button for ${download_id}`);
 
         // Create server download button
         const serverDownloadBtn = document.createElement('button');
@@ -626,7 +626,7 @@ function injectServerDownloadButtons() {
         // Create button content
         const btnLabel = document.createElement('span');
         btnLabel.className = 'p-button-label';
-        btnLabel.textContent = 'Download to Pod';
+        btnLabel.textContent = 'Download to Host';
         serverDownloadBtn.appendChild(btnLabel);
 
         // Status indicator (icon)
@@ -696,34 +696,34 @@ function injectServerDownloadButtons() {
 
         // Add wrapper to main container (alongside Download and Copy URL)
         mainContainer.appendChild(buttonWrapper);
-        console.log(`[RunpodDirect] Button added to main container for ${download_id}`);
+        console.log(`[AutoModelDownloader] Button added to main container for ${download_id}`);
     });
 
-    console.log('[RunpodDirect] Button injection complete');
+    console.log('[AutoModelDownloader] Button injection complete');
 }
 
 // Register the extension
 app.registerExtension({
-    name: "ComfyUI.RunpodDirect",
+    name: "ComfyUI.AutoModelDownloader",
 
     async setup() {
-        console.log("[RunpodDirect] Extension setup starting");
+        console.log("[AutoModelDownloader] Extension setup starting");
 
         // Set up observer to watch for missing models dialog
         setupDialogObserver();
 
         // Also try to inject immediately if dialog already exists
         setTimeout(() => {
-            console.log('[RunpodDirect] Checking for existing dialog...');
+            console.log('[AutoModelDownloader] Checking for existing dialog...');
             injectServerDownloadButtons();
         }, 1000);
 
         // Try again after a longer delay
         setTimeout(() => {
-            console.log('[RunpodDirect] Second check for dialog...');
+            console.log('[AutoModelDownloader] Second check for dialog...');
             injectServerDownloadButtons();
         }, 3000);
 
-        console.log("[RunpodDirect] Extension setup complete");
+        console.log("[AutoModelDownloader] Extension setup complete");
     }
 });

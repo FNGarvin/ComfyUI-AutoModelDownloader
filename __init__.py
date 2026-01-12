@@ -1,5 +1,5 @@
 """
-ComfyUI RunpodDirect - Direct Model Downloads for RunPod
+ComfyUI AutoModelDownloader - Direct Model Downloads for RunPod
 Download models directly to your RunPod instance with multi-connection support
 """
 
@@ -133,11 +133,11 @@ async def process_download_queue():
 
     # Check if already downloading
     if current_download_task is not None and not current_download_task.done():
-        logging.info("[RunpodDirect] Download already in progress, waiting...")
+        logging.info("[AutoModelDownloader] Download already in progress, waiting...")
         return  # Already downloading
 
     if len(download_queue) == 0:
-        logging.info("[RunpodDirect] Queue is empty")
+        logging.info("[AutoModelDownloader] Queue is empty")
         return  # Nothing to process
 
     # Get next download from queue
@@ -151,7 +151,7 @@ async def process_download_queue():
     active_downloads[download_id]["progress"] = 0
     active_downloads[download_id]["downloaded"] = 0
 
-    logging.info(f"[RunpodDirect] Starting download {download_id} with {NUM_CONNECTIONS} connections (full speed)")
+    logging.info(f"[AutoModelDownloader] Starting download {download_id} with {NUM_CONNECTIONS} connections (full speed)")
 
     # Notify frontend that download is starting
     await PromptServer.instance.send("server_download_progress", {
@@ -173,7 +173,7 @@ def on_download_complete(download_id):
     global current_download_task
 
     current_download_task = None
-    logging.info(f"[RunpodDirect] Download completed: {download_id}, processing next in queue...")
+    logging.info(f"[AutoModelDownloader] Download completed: {download_id}, processing next in queue...")
 
     # Process next in queue
     asyncio.create_task(process_download_queue())
@@ -205,7 +205,7 @@ async def download_file(url, output_path, download_id):
     """Download file with multi-connection support and progress tracking"""
     import aiohttp
 
-    logging.info(f"[RunpodDirect] Download {download_id} using {NUM_CONNECTIONS} connections (full speed)")
+    logging.info(f"[AutoModelDownloader] Download {download_id} using {NUM_CONNECTIONS} connections (full speed)")
 
     try:
         # Initialize control for this download
@@ -540,7 +540,7 @@ async def cancel_download(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.get("/extensions/ComfyUI-RunpodDirect/serverDownload.js")
+@PromptServer.instance.routes.get("/extensions/ComfyUI-AutoModelDownloader/serverDownload.js")
 async def serve_js_with_version(request):
     """Serve JS file with cache-busting headers"""
     js_path = os.path.join(os.path.dirname(__file__), "web", "serverDownload.js")
@@ -565,3 +565,4 @@ NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+print("[AutoModelDownloader] Linked and Loaded!", flush=True)

@@ -24,12 +24,11 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/MadiatorLabs/ComfyUI-RunpodDirect"
-Documentation = "https://github.com/MadiatorLabs/ComfyUI-RunpodDirect#readme"
-"Bug Tracker" = "https://github.com/MadiatorLabs/ComfyUI-RunpodDirect/issues"
+Repository = "https://github.com/MadiatorLabs/ComfyUI-AutoModelDownloader"
+Documentation = "https://github.com/MadiatorLabs/ComfyUI-AutoModelDownloader#readme"
+"Bug Tracker" = "https://github.com/MadiatorLabs/ComfyUI-AutoModelDownloader/issues"
 
 [tool.comfy]
 PublisherId = "madiator2011"
 DisplayName = "Madiator2011"
-Icon = "https://peer.madiator.cloud/lazy-static/avatars/769f014a-9bc4-45e4-8fb5-57512aea2e97.png"
 includes = []
