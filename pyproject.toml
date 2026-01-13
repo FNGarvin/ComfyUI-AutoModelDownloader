@@ -32,3 +32,4 @@ Documentation = "https://github.com/MadiatorLabs/ComfyUI-AutoModelDownloader#rea
 PublisherId = "madiator2011"
 DisplayName = "Madiator2011"
 includes = []
+Icon = "https://raw.githubusercontent.com/FNGarvin/ComfyUI-AutoModelDownloader/main/icon.png"

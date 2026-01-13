@@ -626,7 +626,7 @@ function injectServerDownloadButtons() {
         // Create button content
         const btnLabel = document.createElement('span');
         btnLabel.className = 'p-button-label';
-        btnLabel.textContent = 'Download to Host';
+        btnLabel.textContent = 'Download to Comfy';
         serverDownloadBtn.appendChild(btnLabel);
 
         // Status indicator (icon)

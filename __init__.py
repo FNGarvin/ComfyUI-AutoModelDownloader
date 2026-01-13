@@ -69,7 +69,9 @@ async def start_download(request):
             )
 
         # Get the first folder path for this model type
-        output_dir = folder_paths.folder_names_and_paths[save_path][0][0]
+        # Get all eligible folder paths and find the first writable one
+        available_paths = folder_paths.folder_names_and_paths[save_path][0]
+        output_dir = next((p for p in available_paths if os.access(p, os.W_OK)), available_paths[0])
         output_path = os.path.join(output_dir, safe_filename)
 
         # Final security check: ensure the resolved path is within the intended directory
@@ -258,8 +260,11 @@ async def download_file(url, output_path, download_id):
 
             logging.info(f"File size for {download_id}: {total_size} bytes, supports range: {supports_range}")
 
+            # Atomic Download: Use a temporary file ending in .part
+            part_path = output_path + ".part"
+
             # Create file with full size
-            with open(output_path, 'wb') as f:
+            with open(part_path, 'wb') as f:
                 f.seek(total_size - 1)
                 f.write(b'\0')
 
@@ -279,7 +284,7 @@ async def download_file(url, output_path, download_id):
                     end = start + chunk_size - 1 if i < NUM_CONNECTIONS - 1 else total_size - 1
 
                     tasks.append(download_chunk_with_progress(
-                        session, url, start, end, output_path, i, download_id, total_size
+                        session, url, start, end, part_path, i, download_id, total_size
                     ))
 
                 # Download all chunks in parallel
@@ -293,12 +298,16 @@ async def download_file(url, output_path, download_id):
             else:
                 # Fallback to single connection download
                 logging.info(f"Using single connection for {download_id}")
-                await download_single_connection(session, url, output_path, download_id, total_size)
+                await download_single_connection(session, url, part_path, download_id, total_size)
 
             # Check if cancelled
             if download_control[download_id]["cancelled"]:
-                os.remove(output_path)
+                if os.path.exists(part_path):
+                    os.remove(part_path)
                 return
+
+            # Atomic Move: Rename .part to actual filename on success
+            os.rename(part_path, output_path)
 
             # Mark as complete
             active_downloads[download_id]["status"] = "completed"
@@ -337,6 +346,7 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
     chunk_size = end - start + 1
     downloaded = 0
     last_report_time = 0
+    last_log_time = 0
 
     try:
         async with session.get(url, headers=headers) as response:
@@ -367,6 +377,12 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
                     # Send progress updates every 100ms to avoid spam (only from chunk 0)
                     import time
                     current_time = time.time()
+                    
+                    if chunk_index == 0 and (current_time - last_log_time) >= 60.0:
+                        progress = (total_downloaded / total_size) * 100
+                        print(f"[AutoModelDownloader] {download_id}: {progress:.1f}%", flush=True)
+                        last_log_time = current_time
+
                     if chunk_index == 0 and (current_time - last_report_time) >= 0.1:
                         progress = (total_downloaded / total_size) * 100
                         active_downloads[download_id]["progress"] = progress
@@ -389,6 +405,8 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
 async def download_single_connection(session, url, output_path, download_id, total_size):
     """Fallback single connection download"""
     downloaded_size = 0
+    last_log_time = 0
+    import time
 
     async with session.get(url) as response:
         if response.status != 200:
@@ -411,6 +429,11 @@ async def download_single_connection(session, url, output_path, download_id, tot
                 progress = (downloaded_size / total_size) * 100
                 active_downloads[download_id]["progress"] = progress
                 active_downloads[download_id]["downloaded"] = downloaded_size
+
+                current_time = time.time()
+                if (current_time - last_log_time) >= 60.0:
+                     print(f"[AutoModelDownloader] {download_id}: {progress:.1f}%", flush=True)
+                     last_log_time = current_time
 
                 await PromptServer.instance.send("server_download_progress", {
                     "download_id": download_id,
