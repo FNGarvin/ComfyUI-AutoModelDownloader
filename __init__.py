@@ -45,28 +45,31 @@ async def start_download(request):
                 status=400
             )
 
-        # Security: Validate filename to prevent path traversal attacks
-        # Check for any directory separators (both Unix and Windows style)
-        if "/" in filename or "\\" in filename or os.path.sep in filename:
+        # Security: Validate filename to prevent path traversal attacks.
+        # Filenames may include subdirectory paths (e.g., "FLUX1/ae.safetensors"
+        # or "hy3dgen/model.safetensors") which is normal for ComfyUI models.
+        # We allow forward slashes but block everything else dangerous.
+        if "\\" in filename or os.sep == "\\" and "\\" in filename:
             return web.json_response(
-                {"error": "Invalid filename: must not contain path separators"},
+                {"error": "Invalid filename: Windows path separators not allowed"},
                 status=400
             )
 
-        # Additional check for various path traversal patterns
         if ".." in filename or filename.startswith("/") or filename.startswith("~"):
             return web.json_response(
                 {"error": "Invalid filename: path traversal patterns detected"},
                 status=400
             )
 
-        # Normalize the filename to remove any potential tricks
-        safe_filename = os.path.basename(filename)
-        if safe_filename != filename:
+        # Normalize each path component to catch tricks like "foo/./bar"
+        parts = filename.split("/")
+        safe_parts = [os.path.basename(p) for p in parts]
+        if parts != safe_parts:
             return web.json_response(
-                {"error": "Invalid filename: must be a simple filename without path components"},
+                {"error": "Invalid filename: path components contain traversal patterns"},
                 status=400
             )
+        safe_filename = "/".join(safe_parts)
 
         # Get the first folder path for this model type
         # Get all eligible folder paths and find the first writable one
@@ -77,7 +80,7 @@ async def start_download(request):
         # Final security check: ensure the resolved path is within the intended directory
         output_path = os.path.abspath(output_path)
         output_dir = os.path.abspath(output_dir)
-        if not output_path.startswith(output_dir + os.sep):
+        if not output_path.startswith(output_dir + os.sep) and output_path != output_dir:
             return web.json_response(
                 {"error": "Security error: attempted directory escape"},
                 status=400
@@ -582,7 +585,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}

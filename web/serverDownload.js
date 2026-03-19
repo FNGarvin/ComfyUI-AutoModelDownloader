@@ -2,20 +2,19 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 // ComfyUI.AutoModelDownloader Extension
-// Version: 2.0.0 — Rewritten for new Vue-based ComfyUI frontend (v1.3+)
+// Version: 2.1.0 — Fixed directory resolution for server-side downloads
 //
-// The old frontend had a `.comfy-missing-models` dialog with `.p-listbox-option`
-// items. The new frontend renders missing models in a right-side-panel Vue
-// component tree:
-//   TabErrors → MissingModelCard → MissingModelRow
+// v2.0.0 bug: "Download All" and individual downloads put models in wrong
+// directories (e.g. checkpoints/ instead of diffusion_models/) because:
+//   1. "Download All" doesn't click individual buttons, so
+//      lastClickedDirectory from DOM button tracking was never set.
+//   2. guessDirectoryFromUrl() defaulted .safetensors to "checkpoints".
 //
-// Each MissingModelRow has a "Download" button that calls downloadModel() which,
-// in non-desktop (browser) mode, just creates an <a> tag click (browser download).
-// We intercept those clicks and route them through our backend API instead.
-//
-// The "Download All" button lives in TabErrors.vue as a sibling of the group
-// header for missing_model groups.
-console.log('[AutoModelDownloader] v2.0.0');
+// v2.1.0 fix: Build a filename→directory lookup by scraping the missing
+// model panel's category headers BEFORE any downloads start. The panel
+// renders category groups with headers like "diffusion_models (5)" and
+// model rows with title="model.safetensors" underneath.
+console.log('[AutoModelDownloader] v2.1.0');
 
 // ── State ──
 const downloadStates = new Map();
@@ -23,6 +22,63 @@ let isDownloadingAll = false;
 let completedDownloads = 0;
 let totalDownloads = 0;
 const downloadStartTimes = new Map();
+
+// ── filename→directory lookup built from the DOM ──
+let modelDirectoryMap = new Map();
+
+function buildModelDirectoryMap() {
+    const map = new Map();
+
+    // Strategy 1: Find category groups by border-t + border-interface classes
+    // MissingModelCard renders each directory as a group with these classes
+    const groups = document.querySelectorAll('[class*="border-t"][class*="border-interface"]');
+    for (const group of groups) {
+        const headerP = group.querySelector(':scope > div > p.font-medium, :scope > div > p[class*="font-medium"]');
+        if (!headerP) continue;
+
+        const catText = headerP.textContent.trim();
+        // "checkpoints (3)" or "diffusion_models (5)" → strip count
+        const directory = catText.replace(/\s*\(\d+\)\s*$/, '').trim();
+        if (!directory || directory.includes(' ')) continue;
+
+        const titleEls = group.querySelectorAll('p[title]');
+        for (const el of titleEls) {
+            const title = el.getAttribute('title');
+            if (title && title.includes('.')) {
+                map.set(title, directory);
+            }
+        }
+    }
+
+    // Strategy 2: Broader search if Strategy 1 found nothing
+    if (map.size === 0) {
+        const allPs = document.querySelectorAll('p.font-medium, p[class*="font-medium"]');
+        for (const p of allPs) {
+            const catText = p.textContent.trim();
+            const match = catText.match(/^([a-z_]+)\s*\(\d+\)$/);
+            if (!match) continue;
+            const directory = match[1];
+
+            let container = p.parentElement?.parentElement;
+            if (!container) continue;
+
+            const titleEls = container.querySelectorAll('p[title]');
+            for (const el of titleEls) {
+                const title = el.getAttribute('title');
+                if (title && title.includes('.')) {
+                    map.set(title, directory);
+                }
+            }
+        }
+    }
+
+    if (map.size > 0) {
+        console.log(`[AutoModelDownloader] Built directory map: ${map.size} models`);
+    }
+
+    modelDirectoryMap = map;
+    return map;
+}
 
 // ── Helpers ──
 function formatBytes(bytes) {
@@ -116,25 +172,6 @@ window.serverDownload = {
 };
 
 // ── DOM interception for the new Vue frontend ──
-//
-// Strategy: We use a MutationObserver to watch for download buttons rendered
-// by the new MissingModelRow.vue and TabErrors.vue components. Instead of
-// looking for a specific CSS class on a dialog, we look for:
-//
-// 1. Per-model "Download" buttons: These are <button> elements inside the
-//    missing model rows that contain an icon-[lucide--download] icon and
-//    a text span with "Download" (possibly with a size suffix).
-//
-// 2. "Download all" button: In the group header for missing models, a button
-//    whose text starts with "Download all".
-//
-// When we find these buttons, we clone-replace them with our own versions
-// that call the server download API instead of triggering browser downloads.
-//
-// We also intercept <a> tag clicks as a fallback — the frontend's
-// downloadModel() creates a temporary <a> element and clicks it.
-
-// Intercept <a> tag creation for model downloads
 const DOWNLOAD_URL_PATTERNS = [
     'civitai.com',
     'huggingface.co',
@@ -149,95 +186,14 @@ function isModelDownloadUrl(url) {
     return isFromKnownSource || hasModelExtension;
 }
 
-// Parse a model URL to extract directory and filename.
-// The frontend's downloadModel() is called with { name, url, directory }.
-// We need to reconstruct directory + filename from the URL context.
-// The MissingModelRow shows: category header (directory) → model name (filename).
-function parseModelFromButton(button) {
-    // Walk up to find the model row container and category header
-    // MissingModelRow structure:
-    //   <div class="flex w-full flex-col pb-3">  ← row root
-    //     <div class="flex h-8 ...">  ← header with model name
-    //       <i class="icon-[lucide--file-check]" />
-    //       <div> <p title="modelname">modelname (N)</p> ... </div>
-    //     </div>
-    //     ...
-    //     <div> <button> Download </button> </div>  ← our target
-    //   </div>
-
-    let rowRoot = button.closest('.pb-3');
-    if (!rowRoot) rowRoot = button.parentElement?.parentElement?.parentElement;
-
-    let filename = null;
-    let directory = null;
-
-    // Find model name from the row header
-    if (rowRoot) {
-        const nameEl = rowRoot.querySelector('[title]');
-        if (nameEl) {
-            // Text is like "model.safetensors (2)" — strip the count
-            const raw = nameEl.getAttribute('title') || nameEl.textContent.trim();
-            filename = raw.replace(/\s*\(\d+\)\s*$/, '').trim();
-        }
-    }
-
-    // Find directory from the category header above this row
-    // MissingModelCard structure:
-    //   <div class="px-4 pb-2">
-    //     <div class="flex w-full flex-col border-t ...">  ← category group
-    //       <div class="flex h-8 ..."> <p>checkpoints (N)</p> </div>  ← category header
-    //       <div class="flex flex-col gap-1 ...">  ← rows container
-    //         <MissingModelRow />  ← our row
-    //       </div>
-    //     </div>
-    //   </div>
-    const categoryGroup = button.closest('.border-t, [class*="border-interface-stroke"]');
-    if (categoryGroup) {
-        const headerP = categoryGroup.querySelector(':scope > div > p');
-        if (headerP) {
-            const catText = headerP.textContent.trim();
-            // Text is like "checkpoints (3)" — strip the count
-            directory = catText.replace(/\s*\(\d+\)\s*$/, '').trim();
-        }
-    }
-
-    // Fallback: try to find the URL from a nearby element or the button's data
-    let url = null;
-    if (rowRoot) {
-        // The URL might be in a hidden element or we can try to find it from
-        // the model name + known URL patterns. But the frontend doesn't expose
-        // the URL in the DOM directly in the new version.
-        // We'll need to query the ComfyUI API for missing models to get URLs.
-    }
-
-    return { filename, directory, url };
-}
-
-// Query the ComfyUI backend for the list of missing models with their URLs
-let cachedMissingModels = null;
-let cacheTimestamp = 0;
-const CACHE_TTL = 5000; // 5 seconds
-
-async function getMissingModels() {
-    const now = Date.now();
-    if (cachedMissingModels && (now - cacheTimestamp) < CACHE_TTL) {
-        return cachedMissingModels;
-    }
-    try {
-        // The missing model store data is available via the frontend's internal
-        // state. We can access it through the Vue app's reactive state.
-        // However, a simpler approach: intercept at the <a> tag level.
-        cachedMissingModels = null;
-        return null;
-    } catch (e) {
-        return null;
-    }
-}
-
 // ── Primary interception: Monkey-patch document.createElement ──
-// The frontend's downloadModel() for non-desktop creates an <a> tag, sets
-// href to the model URL, and clicks it. We intercept this by patching
-// createElement to detect model download <a> tags.
+// The frontend's downloadModel() creates an <a> tag with href=url and
+// download=filename, then clicks it. We intercept the click to route
+// through our server download API instead.
+//
+// Key fix in v2.1.0: We resolve the directory (save_path) from our
+// modelDirectoryMap which is built by scraping the missing model panel,
+// NOT from URL heuristics.
 const originalCreateElement = document.createElement.bind(document);
 let interceptEnabled = true;
 
@@ -245,7 +201,6 @@ document.createElement = function(tagName, options) {
     const el = originalCreateElement(tagName, options);
 
     if (tagName.toLowerCase() === 'a' && interceptEnabled) {
-        // Wrap the click method to intercept model downloads
         const originalClick = el.click.bind(el);
         let clickIntercepted = false;
 
@@ -257,39 +212,39 @@ document.createElement = function(tagName, options) {
 
             if (href && isModelDownloadUrl(href) && download) {
                 clickIntercepted = true;
-                console.log(`[AutoModelDownloader] Intercepted browser download: ${download} from ${href}`);
-
-                // Parse filename and directory from the download attribute
-                // download attr is set to model.name (e.g. "model.safetensors")
                 const filename = download;
 
-                // We need the directory (save_path). The frontend calls
-                // downloadModel({ name, url, directory }, paths) where directory
-                // is the folder_paths key like "checkpoints", "loras", etc.
-                // We can try to extract it from the DOM context or use a
-                // heuristic based on the URL.
-                //
-                // Better approach: hook into the downloadModel function itself.
-                // But since we can't easily patch Vue internals, we'll use the
-                // DOM context from the most recently clicked button.
-                const directory = lastClickedDirectory || guessDirectoryFromUrl(href, filename);
+                // v2.1.0: Look up directory from our pre-built map first
+                // Rebuild the map on every intercept to catch dynamic DOM changes
+                buildModelDirectoryMap();
+                let directory = modelDirectoryMap.get(filename);
+
+                if (!directory) {
+                    // Fallback: try partial match (filename without path prefix)
+                    const baseName = filename.split('/').pop();
+                    directory = modelDirectoryMap.get(baseName);
+                }
+
+                if (!directory) {
+                    // Last resort: URL heuristic (kept for edge cases)
+                    directory = guessDirectoryFromUrl(href, filename);
+                }
 
                 if (directory) {
-                    console.log(`[AutoModelDownloader] Server download: ${directory}/${filename}`);
+                    console.log(`[AutoModelDownloader] Intercepted: ${directory}/${filename} (from ${href})`);
                     startServerDownload(href, directory, filename).then(result => {
                         if (result.success) {
                             showDownloadToast(filename, 'queued');
                         } else {
                             console.error(`[AutoModelDownloader] Server download failed: ${result.error}`);
                             showDownloadToast(filename, 'error', result.error);
-                            // Fall back to browser download
                             interceptEnabled = false;
                             originalClick();
                             interceptEnabled = true;
                         }
                     });
                 } else {
-                    console.warn('[AutoModelDownloader] Could not determine directory, falling back to browser');
+                    console.warn('[AutoModelDownloader] Could not determine directory for', filename, '- falling back to browser');
                     originalClick();
                 }
                 return;
@@ -302,11 +257,7 @@ document.createElement = function(tagName, options) {
     return el;
 };
 
-// Track the directory from the most recently clicked download button
-let lastClickedDirectory = null;
-
 function guessDirectoryFromUrl(url, filename) {
-    // Common model type patterns in URLs
     const urlLower = url.toLowerCase();
     if (urlLower.includes('/lora') || urlLower.includes('lora')) return 'loras';
     if (urlLower.includes('/checkpoint') || urlLower.includes('checkpoint')) return 'checkpoints';
@@ -316,15 +267,13 @@ function guessDirectoryFromUrl(url, filename) {
     if (urlLower.includes('/upscale') || urlLower.includes('upscale')) return 'upscale_models';
     if (urlLower.includes('/unet') || urlLower.includes('unet')) return 'unet';
     if (urlLower.includes('/clip') || urlLower.includes('clip')) return 'clip';
-    // Default to checkpoints for .safetensors/.ckpt files
-    if (filename && (filename.endsWith('.safetensors') || filename.endsWith('.ckpt'))) return 'checkpoints';
+    if (urlLower.includes('/text_encoder') || urlLower.includes('text_encoder')) return 'text_encoders';
+    if (urlLower.includes('/diffusion_model') || urlLower.includes('diffusion_model')) return 'diffusion_models';
+    // No more default to checkpoints — return null to force browser fallback
     return null;
 }
 
-// ── Secondary interception: Watch for download buttons in the DOM ──
-// This catches the "Download" and "Download all" buttons and adds context
-// tracking so we know which directory each download belongs to.
-
+// ── Secondary: Watch for download buttons to pre-build the map ──
 function setupButtonObserver() {
     console.log('[AutoModelDownloader] Setting up button observer for new frontend');
 
@@ -340,7 +289,7 @@ function setupButtonObserver() {
 
     observer.observe(document.body, { childList: true, subtree: true });
 
-    // Also process existing content
+    // Process existing content after a delay
     setTimeout(() => processNewNode(document.body), 2000);
     setTimeout(() => processNewNode(document.body), 5000);
 }
@@ -348,7 +297,6 @@ function setupButtonObserver() {
 function processNewNode(root) {
     if (!root || !root.querySelectorAll) return;
 
-    // Find all buttons that look like download buttons
     const buttons = root.querySelectorAll('button');
     for (const btn of buttons) {
         if (btn.dataset.autoModelPatched) continue;
@@ -356,81 +304,30 @@ function processNewNode(root) {
         const text = btn.textContent.trim().toLowerCase();
         const hasDownloadIcon = btn.querySelector('[class*="icon-"][class*="download"]');
 
-        // Per-model "Download" button
         if ((text.startsWith('download') && !text.includes('all')) && hasDownloadIcon) {
             patchSingleDownloadButton(btn);
         }
 
-        // "Download all" button in the group header
         if (text.startsWith('download all')) {
             patchDownloadAllButton(btn);
         }
     }
 }
 
-function findDirectoryForButton(btn) {
-    // Walk up to find the category group and extract directory name
-    // The structure is: category group div > rows container > row > ... > button
-    let el = btn.parentElement;
-    const maxDepth = 15;
-    let depth = 0;
-
-    while (el && depth < maxDepth) {
-        // Look for the category header pattern: a <p> with text like "checkpoints (3)"
-        // that's inside a flex container at the top of a border-t group
-        const categoryP = el.querySelector(':scope > div > p.font-medium');
-        if (categoryP) {
-            const catText = categoryP.textContent.trim();
-            const directory = catText.replace(/\s*\(\d+\)\s*$/, '').trim();
-            if (directory && !directory.includes(' ')) {
-                return directory;
-            }
-        }
-        el = el.parentElement;
-        depth++;
-    }
-    return null;
-}
-
-function findModelNameForButton(btn) {
-    // Walk up to the row root and find the model name
-    let el = btn.parentElement;
-    const maxDepth = 10;
-    let depth = 0;
-
-    while (el && depth < maxDepth) {
-        const nameEl = el.querySelector('p[title]');
-        if (nameEl) {
-            const title = nameEl.getAttribute('title');
-            if (title) return title;
-            return nameEl.textContent.trim().replace(/\s*\(\d+\)\s*$/, '').trim();
-        }
-        el = el.parentElement;
-        depth++;
-    }
-    return null;
-}
-
 function patchSingleDownloadButton(btn) {
     btn.dataset.autoModelPatched = 'true';
-
-    btn.addEventListener('click', (e) => {
-        const directory = findDirectoryForButton(btn);
-        if (directory) {
-            lastClickedDirectory = directory;
-            console.log(`[AutoModelDownloader] Click context: directory=${directory}`);
-        }
-    }, true); // capture phase — runs before Vue's handler
+    // Pre-build the map when any download button appears
+    buildModelDirectoryMap();
 }
 
 function patchDownloadAllButton(btn) {
     btn.dataset.autoModelPatched = 'true';
 
     btn.addEventListener('click', (e) => {
-        console.log('[AutoModelDownloader] "Download All" clicked — server downloads will be intercepted via <a> tag patching');
-        // The <a> tag interception handles the actual routing.
-        // We just log here for debugging.
-    }, true);
+        // Pre-build the map right before "Download All" triggers
+        buildModelDirectoryMap();
+        console.log('[AutoModelDownloader] "Download All" clicked — directory map has', modelDirectoryMap.size, 'entries');
+    }, true); // capture phase — runs before Vue's handler
 }
 
 // ── Toast notifications ──
@@ -460,7 +357,6 @@ function showDownloadToast(filename, status, error) {
 }
 
 // ── Progress overlay ──
-// Listen for download events and show a floating progress indicator
 let progressOverlay = null;
 
 function ensureProgressOverlay() {
@@ -503,7 +399,6 @@ window.addEventListener('serverDownloadUpdate', (event) => {
         if (item) {
             setTimeout(() => item?.remove(), 3000);
         }
-        // Hide overlay if no more active downloads
         setTimeout(() => {
             if (container.children.length === 0) {
                 overlay.style.display = 'none';
@@ -534,7 +429,6 @@ window.addEventListener('serverDownloadUpdate', (event) => {
         </div>
     `;
 
-    // Update overall counter
     const overall = document.getElementById('automodel-overall');
     if (overall && isDownloadingAll) {
         overall.textContent = `${completedDownloads}/${totalDownloads}`;
@@ -545,7 +439,7 @@ window.addEventListener('serverDownloadUpdate', (event) => {
 app.registerExtension({
     name: "ComfyUI.AutoModelDownloader",
     async setup() {
-        console.log("[AutoModelDownloader] Extension setup — new frontend interception mode");
+        console.log("[AutoModelDownloader] Extension setup — v2.1.0 with directory map fix");
         setupButtonObserver();
         console.log("[AutoModelDownloader] Ready. Browser model downloads will be intercepted and routed to server.");
     }
