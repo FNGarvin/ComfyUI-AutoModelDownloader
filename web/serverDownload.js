@@ -2,18 +2,20 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 // ComfyUI.AutoModelDownloader Extension
-// Version: 3.0.0 — Explicit "Server Download" buttons (no interception)
+// Version: 3.1.0 — DOM-agnostic button injection
 //
-// Previous versions (v1–v2) monkey-patched document.createElement to
-// intercept <a> tag clicks from the Vue frontend's downloadModel().
-// This caused race conditions ("Download All" first model falling through
-// to browser) and was fragile against frontend updates.
+// v3.0.0 targeted the right-side panel DOM structure (border-interface
+// category groups, p[title] elements). But the missing-model UI also
+// renders as a popup dialog with a different, simpler DOM. Both views
+// use the same Vue components (MissingModelRow.vue) internally.
 //
-// v3.0.0: Injects explicit "⬇ Server" buttons next to each model's
-// existing controls, plus a "Download All to Server" button. No
-// interception of the original download flow — browser downloads still
-// work as-is for users who want them.
-console.log('[AutoModelDownloader] v3.0.0');
+// v3.1.0: Instead of matching specific CSS layout classes, we find
+// download buttons by their icon class (icon-[lucide--download]) which
+// exists in both the panel and dialog views. We walk up from each
+// download button to the row component, use Vue introspection to get
+// model data (url, directory, name), and inject a sibling server
+// download button. This works regardless of the container layout.
+console.log('[AutoModelDownloader] v3.1.0');
 
 // ── Download state tracking ──
 const downloadStates = new Map();
@@ -68,9 +70,7 @@ api.addEventListener("server_download_complete", ({ detail }) => {
 
 api.addEventListener("server_download_error", ({ detail }) => {
     const { download_id, error } = detail;
-    if (serverDownloadAllActive) {
-        serverDownloadAllCompleted++;
-    }
+    if (serverDownloadAllActive) serverDownloadAllCompleted++;
     downloadStates.set(download_id, { status: 'error', error });
     window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
         detail: { download_id, ...downloadStates.get(download_id) }
@@ -95,9 +95,7 @@ async function startServerDownload(url, savePath, filename) {
             body: JSON.stringify({ url, save_path: savePath, filename })
         });
         const result = await response.json();
-        if (response.ok) {
-            return { success: true, download_id };
-        }
+        if (response.ok) return { success: true, download_id };
         return { success: false, error: result.error };
     } catch (error) {
         console.error("[AutoModelDownloader] Failed to start download:", error);
@@ -111,105 +109,52 @@ window.serverDownload = {
     states: downloadStates
 };
 
-// ── DOM scraping: extract model info from the missing-model panel ──
-// MissingModelCard.vue renders:
-//   <div class="border-t border-interface-stroke ...">     ← category group
-//     <p class="font-medium">diffusion_models (5)</p>      ← directory header
-//     <div class="pl-2">                                   ← model rows container
-//       <MissingModelRow :model :directory />
-//         → <div class="flex w-full flex-col pb-3">
-//             <div class="flex h-8 ...">
-//               <p title="model.safetensors" class="font-medium">model.safetensors (2)</p>
-//               ... buttons ...
-//             </div>
-//
-// MissingModelRow doesn't render the download URL in the DOM — it's only
-// in Vue's reactive state. But the upstream downloadModel() reads it from
-// the model object which has { name, url, directory }. We can't access
-// Vue internals, so we extract the URL from the "Copy URL" button or
-// from the model's HuggingFace/Civitai link if present.
-//
-// Strategy: We find each model row's p[title] for the filename, walk up
-// to the category group for the directory, and look for a URL source.
-
-function scrapeModelsFromPanel() {
-    const models = [];
-
-    // Find category groups: divs with border-t + border-interface classes
-    const groups = document.querySelectorAll(
-        '[class*="border-t"][class*="border-interface"]'
-    );
-
-    for (const group of groups) {
-        // Extract directory from header: "diffusion_models (5)" → "diffusion_models"
-        const headerP = group.querySelector(
-            ':scope > div > p[class*="font-medium"], :scope > div > p.font-medium'
-        );
-        if (!headerP) continue;
-
-        const catText = headerP.textContent.trim();
-        const directory = catText.replace(/\s*\(\d+\)\s*$/, '').trim();
-        if (!directory || directory.includes(' ')) continue;
-
-        // Find model rows within this group
-        const titleEls = group.querySelectorAll('p[title]');
-        for (const el of titleEls) {
-            const filename = el.getAttribute('title');
-            if (!filename || !filename.includes('.')) continue;
-
-            // Try to find the URL: look for a nearby link or the Vue component's
-            // __vueParentComponent which holds the model prop
-            let url = null;
-
-            // Method 1: Walk up to the MissingModelRow root and check Vue internals
-            let rowRoot = el.closest('.pb-3') || el.closest('[class*="pb-3"]');
-            if (rowRoot) {
-                // Vue 3 exposes component data on __vueParentComponent
-                const vueNode = findVueComponent(rowRoot);
-                if (vueNode?.props?.model?.representative?.url) {
-                    url = vueNode.props.model.representative.url;
-                } else if (vueNode?.props?.model?.url) {
-                    url = vueNode.props.model.url;
-                }
-            }
-
-            // Method 2: Look for a "Copy URL" button sibling and extract from clipboard handler
-            // (fallback — less reliable)
-            if (!url && rowRoot) {
-                const buttons = rowRoot.querySelectorAll('button');
-                for (const btn of buttons) {
-                    const btnText = btn.textContent.trim().toLowerCase();
-                    if (btnText.includes('copy') && btnText.includes('url')) {
-                        // The URL is passed to copyToClipboard — we can't intercept that,
-                        // but we can try the Vue component approach on the button
-                        const btnVue = findVueComponent(btn);
-                        if (btnVue?.props?.onClick) {
-                            // Can't easily extract — skip
-                        }
-                    }
-                }
-            }
-
-            models.push({ filename, directory, url, rowElement: rowRoot });
-        }
-    }
-
-    return models;
-}
-
-// Walk up the DOM to find a Vue 3 component instance
-function findVueComponent(el) {
+// ── Vue component introspection ──
+// Walk up the DOM to find a Vue 3 component instance that has model data.
+// Vue 3 attaches __vueParentComponent on the element that is the root of
+// a component's template. We look for one whose props contain a `model`
+// object with the download URL.
+function findModelData(el) {
     let node = el;
-    while (node) {
-        if (node.__vueParentComponent) return node.__vueParentComponent;
-        if (node._vnode?.component) return node._vnode.component;
-        // Vue 3 internal: __vue_app__ on root, __vnode on elements
-        const keys = Object.keys(node);
-        for (const key of keys) {
-            if (key.startsWith('__vue')) {
-                const val = node[key];
-                if (val?.props?.model) return val;
-                if (val?.proxy?.$props?.model) return { props: val.proxy.$props };
+    // Walk up at most 15 levels to find the MissingModelRow component
+    for (let i = 0; i < 15 && node; i++) {
+        // Vue 3 internal: __vueParentComponent on component root elements
+        const vcomp = node.__vueParentComponent;
+        if (vcomp) {
+            const props = vcomp.props;
+            if (props?.model) {
+                // MissingModelRow has model.representative.url and model.representative.directory
+                const rep = props.model.representative || props.model;
+                const url = rep?.url || props.model?.url;
+                const directory = rep?.directory || props.model?.directory || props.directory;
+                const name = rep?.name || props.model?.name;
+                if (url || name) {
+                    return { url, directory, name };
+                }
+            }
+        }
+        // Also check for Vue 3 internal fiber keys (__vue_*, __vnode)
+        if (node.__vue_app__ || node.__vnode) {
+            // Root app node — skip
+        } else {
+            const keys = Object.getOwnPropertyNames(node);
+            for (const key of keys) {
+                if (!key.startsWith('__vue')) continue;
+                try {
+                    const val = node[key];
+                    if (val?.props?.model) {
+                        const rep = val.props.model.representative || val.props.model;
+                        const url = rep?.url || val.props.model?.url;
+                        const directory = rep?.directory || val.props.model?.directory || val.props?.directory;
+                        const name = rep?.name || val.props.model?.name;
+                        if (url || name) return { url, directory, name };
+                    }
+                    if (val?.proxy?.$props?.model) {
+                        const m = val.proxy.$props.model;
+                        const rep = m.representative || m;
+                        return { url: rep?.url || m?.url, directory: rep?.directory || m?.directory, name: rep?.name || m?.name };
+                    }
+                } catch (_) { /* ignore */ }
             }
         }
         node = node.parentElement;
@@ -217,7 +162,89 @@ function findVueComponent(el) {
     return null;
 }
 
-// ── Button injection ──
+// ── DOM-agnostic model discovery ──
+// Instead of matching specific panel layout classes, we find all download
+// buttons by their icon class. MissingModelRow.vue renders:
+//   <Button @click="handleDownload">
+//     <template #icon><i class="icon-[lucide--download]" /></template>
+//     Download
+//   </Button>
+//
+// We find every <i> with class containing "icon-[lucide--download]" (or
+// similar patterns), walk up to the <button>, then walk up further to
+// find the row component and extract model data via Vue introspection.
+
+function discoverModels() {
+    const models = [];
+    const seen = new Set();
+
+    // Strategy 1: Find download icon elements
+    // The icon class uses Iconify/UnoCSS format: icon-[lucide--download]
+    // In the rendered DOM this becomes a CSS class. Query broadly.
+    const downloadIcons = document.querySelectorAll(
+        'i[class*="lucide--download"], i[class*="download"], span[class*="lucide--download"]'
+    );
+
+    for (const icon of downloadIcons) {
+        // Walk up to the button
+        const btn = icon.closest('button');
+        if (!btn) continue;
+
+        // Skip our own injected buttons
+        if (btn.hasAttribute('data-automodel-server')) continue;
+
+        // Walk up to find the row container and Vue model data
+        const modelData = findModelData(btn);
+        if (!modelData) continue;
+
+        const key = `${modelData.directory}/${modelData.name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        models.push({
+            url: modelData.url,
+            directory: modelData.directory,
+            filename: modelData.name,
+            downloadButton: btn,  // The original download button — we inject next to it
+        });
+    }
+
+    // Strategy 2: Fallback — find p[title] elements that look like model filenames
+    // and walk up to find Vue data. This catches cases where the icon class
+    // doesn't match our selector (e.g., different icon library version).
+    if (models.length === 0) {
+        const titleEls = document.querySelectorAll('p[title]');
+        for (const el of titleEls) {
+            const title = el.getAttribute('title');
+            if (!title || !title.includes('.')) continue;
+            // Looks like a filename (has extension)
+            if (seen.has(title)) continue;
+
+            const modelData = findModelData(el);
+            if (!modelData) continue;
+
+            const key = `${modelData.directory}/${modelData.name}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            // Find the nearest button to inject next to
+            const row = el.closest('div');
+            const nearestBtn = row?.querySelector('button:not([data-automodel-server])');
+
+            models.push({
+                url: modelData.url,
+                directory: modelData.directory,
+                filename: modelData.name || title,
+                downloadButton: nearestBtn,
+            });
+        }
+    }
+
+    console.log(`[AutoModelDownloader] Discovered ${models.length} models`);
+    return models;
+}
+
+// ── Button creation and injection ──
 const BUTTON_MARKER = 'data-automodel-server';
 
 function createServerButton(label, onClick, size = 'sm') {
@@ -230,71 +257,48 @@ function createServerButton(label, onClick, size = 'sm') {
         onClick(btn);
     });
 
+    const baseStyle = `
+        display: inline-flex; align-items: center; gap: 4px;
+        border-radius: 6px; background: #1a6b3c; color: #e0e0e0;
+        border: 1px solid #2a8a4e; cursor: pointer; white-space: nowrap;
+        transition: background 0.15s;
+    `;
     if (size === 'sm') {
-        // Small icon-style button for individual model rows
-        btn.style.cssText = `
-            display: inline-flex; align-items: center; gap: 4px;
-            padding: 2px 8px; border-radius: 6px; font-size: 12px;
-            background: #1a6b3c; color: #e0e0e0; border: 1px solid #2a8a4e;
-            cursor: pointer; white-space: nowrap; height: 28px;
-            transition: background 0.15s;
-        `;
-        btn.addEventListener('mouseenter', () => { btn.style.background = '#228b47'; });
-        btn.addEventListener('mouseleave', () => { btn.style.background = '#1a6b3c'; });
+        btn.style.cssText = baseStyle + 'padding: 2px 8px; font-size: 12px; height: 28px;';
     } else {
-        // Larger button for "Download All to Server"
-        btn.style.cssText = `
-            display: inline-flex; align-items: center; gap: 6px;
-            padding: 6px 14px; border-radius: 8px; font-size: 13px;
-            background: #1a6b3c; color: #e0e0e0; border: 1px solid #2a8a4e;
-            cursor: pointer; white-space: nowrap; height: 32px;
-            font-weight: 500; transition: background 0.15s;
-        `;
-        btn.addEventListener('mouseenter', () => { btn.style.background = '#228b47'; });
-        btn.addEventListener('mouseleave', () => { btn.style.background = '#1a6b3c'; });
+        btn.style.cssText = baseStyle + 'padding: 6px 14px; font-size: 13px; height: 32px; font-weight: 500;';
     }
-
+    btn.addEventListener('mouseenter', () => { btn.style.background = '#228b47'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = '#1a6b3c'; });
     return btn;
 }
 
 function injectServerButtons() {
-    // Skip if already injected (check for our marker)
-    const existing = document.querySelectorAll(`[${BUTTON_MARKER}]`);
     // Clean up stale buttons from previous renders
-    existing.forEach(el => {
+    document.querySelectorAll(`[${BUTTON_MARKER}]`).forEach(el => {
         if (!document.body.contains(el.parentElement)) el.remove();
     });
 
-    const models = scrapeModelsFromPanel();
+    const models = discoverModels();
     if (models.length === 0) return;
 
     let injectedCount = 0;
 
-    // Inject per-model "⬇ Server" buttons
     for (const model of models) {
-        if (!model.rowElement) continue;
+        if (!model.downloadButton) continue;
 
-        // Find the button row (first child div with flex + h-8)
-        const buttonRow = model.rowElement.querySelector('.flex.h-8, [class*="flex"][class*="h-8"]');
-        if (!buttonRow) continue;
-
-        // Skip if already injected
-        if (buttonRow.querySelector(`[${BUTTON_MARKER}]`)) continue;
+        // Skip if already injected next to this button
+        const parent = model.downloadButton.parentElement;
+        if (!parent) continue;
+        if (parent.querySelector(`[${BUTTON_MARKER}]`)) continue;
 
         if (!model.url) {
-            // No URL available — inject a disabled button with tooltip
             const btn = createServerButton('⬇ Server', () => {}, 'sm');
             btn.disabled = true;
             btn.style.opacity = '0.4';
             btn.style.cursor = 'not-allowed';
             btn.title = 'URL not available — use browser download';
-            // Insert before the expand chevron (last button)
-            const lastBtn = buttonRow.querySelector('button:last-of-type');
-            if (lastBtn) {
-                buttonRow.insertBefore(btn, lastBtn);
-            } else {
-                buttonRow.appendChild(btn);
-            }
+            model.downloadButton.insertAdjacentElement('afterend', btn);
             injectedCount++;
             continue;
         }
@@ -322,17 +326,12 @@ function injectServerButtons() {
             }
         }, 'sm');
 
-        // Insert before the expand chevron
-        const lastBtn = buttonRow.querySelector('button:last-of-type');
-        if (lastBtn) {
-            buttonRow.insertBefore(btn, lastBtn);
-        } else {
-            buttonRow.appendChild(btn);
-        }
+        // Insert right after the original download button
+        model.downloadButton.insertAdjacentElement('afterend', btn);
         injectedCount++;
     }
 
-    // Inject "Download All to Server" button near the existing "Download All"
+    // Inject "Download All to Server" button
     injectDownloadAllServerButton(models);
 
     if (injectedCount > 0) {
@@ -341,23 +340,19 @@ function injectServerButtons() {
 }
 
 function injectDownloadAllServerButton(models) {
-    // Find the existing "Download All" button
-    const allButtons = document.querySelectorAll('button');
+    // Find the existing "Download All" button (text match)
     let downloadAllBtn = null;
-    for (const btn of allButtons) {
+    for (const btn of document.querySelectorAll('button')) {
         const text = btn.textContent.trim().toLowerCase();
         if (text.includes('download all') && !btn.hasAttribute(BUTTON_MARKER)) {
             downloadAllBtn = btn;
             break;
         }
     }
-
     if (!downloadAllBtn) return;
 
-    // Check if we already injected next to it
     const parent = downloadAllBtn.parentElement;
-    if (!parent) return;
-    if (parent.querySelector(`[${BUTTON_MARKER}="download-all"]`)) return;
+    if (!parent || parent.querySelector(`[${BUTTON_MARKER}="download-all"]`)) return;
 
     const downloadableModels = models.filter(m => m.url);
 
@@ -368,12 +363,10 @@ function injectDownloadAllServerButton(models) {
                 showDownloadToast('No models', 'error', 'No downloadable URLs found');
                 return;
             }
-
             btnEl.disabled = true;
             serverDownloadAllActive = true;
             serverDownloadAllCompleted = 0;
             serverDownloadAllTotal = downloadableModels.length;
-
             btnEl.textContent = `⏳ 0/${downloadableModels.length}`;
             btnEl.style.background = '#1565c0';
 
@@ -384,7 +377,6 @@ function injectDownloadAllServerButton(models) {
                 }
             }
 
-            // Update button as downloads complete
             const checkInterval = setInterval(() => {
                 btnEl.textContent = `⏳ ${serverDownloadAllCompleted}/${serverDownloadAllTotal}`;
                 if (!serverDownloadAllActive) {
@@ -402,8 +394,6 @@ function injectDownloadAllServerButton(models) {
         'lg'
     );
     btn.setAttribute(BUTTON_MARKER, 'download-all');
-
-    // Insert after the existing Download All button
     downloadAllBtn.insertAdjacentElement('afterend', btn);
 }
 
@@ -417,7 +407,6 @@ function showDownloadToast(filename, status, error) {
         transition: opacity 0.3s; max-width: 400px;
         font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     `;
-
     if (status === 'queued') {
         toast.style.background = '#2196F3';
         toast.textContent = `⬇️ Server download queued: ${filename}`;
@@ -425,7 +414,6 @@ function showDownloadToast(filename, status, error) {
         toast.style.background = '#ef4444';
         toast.textContent = `❌ Download failed: ${filename} — ${error}`;
     }
-
     document.body.appendChild(toast);
     setTimeout(() => {
         toast.style.opacity = '0';
@@ -438,7 +426,6 @@ let progressOverlay = null;
 
 function ensureProgressOverlay() {
     if (progressOverlay && document.body.contains(progressOverlay)) return progressOverlay;
-
     progressOverlay = document.createElement('div');
     progressOverlay.id = 'automodel-progress-overlay';
     progressOverlay.style.cssText = `
@@ -447,8 +434,7 @@ function ensureProgressOverlay() {
         border-radius: 12px; padding: 16px; min-width: 300px; max-width: 420px;
         color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, sans-serif;
         font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-        max-height: 400px; overflow-y: auto;
-        display: none;
+        max-height: 400px; overflow-y: auto; display: none;
     `;
     progressOverlay.innerHTML = `
         <div style="font-weight: 600; margin-bottom: 8px; display: flex; justify-content: space-between;">
@@ -473,13 +459,9 @@ window.addEventListener('serverDownloadUpdate', (event) => {
     let item = document.getElementById(itemId);
 
     if (status === 'completed' || status === 'error') {
-        if (item) {
-            setTimeout(() => item?.remove(), 3000);
-        }
+        if (item) setTimeout(() => item?.remove(), 3000);
         setTimeout(() => {
-            if (container.children.length === 0) {
-                overlay.style.display = 'none';
-            }
+            if (container.children.length === 0) overlay.style.display = 'none';
         }, 3500);
         return;
     }
@@ -512,17 +494,14 @@ window.addEventListener('serverDownloadUpdate', (event) => {
     }
 });
 
-// ── MutationObserver: watch for the missing-model panel and inject buttons ──
+// ── MutationObserver: watch for missing-model UI in any container ──
 function setupPanelObserver() {
-    console.log('[AutoModelDownloader] Setting up panel observer');
+    console.log('[AutoModelDownloader] Setting up DOM observer');
 
-    // Debounce injection to avoid hammering during rapid DOM updates
     let injectTimeout = null;
     function scheduleInject() {
         if (injectTimeout) clearTimeout(injectTimeout);
-        injectTimeout = setTimeout(() => {
-            injectServerButtons();
-        }, 300);
+        injectTimeout = setTimeout(() => injectServerButtons(), 300);
     }
 
     const observer = new MutationObserver((mutations) => {
@@ -530,8 +509,10 @@ function setupPanelObserver() {
             if (mutation.addedNodes.length === 0) continue;
             for (const node of mutation.addedNodes) {
                 if (node.nodeType !== Node.ELEMENT_NODE) continue;
-                // Check if this looks like missing-model panel content
+                // Trigger on any DOM addition that looks like it could contain
+                // model rows: download icons, p[title] elements, or "Download All" text
                 if (node.querySelector && (
+                    node.querySelector('i[class*="download"]') ||
                     node.querySelector('p[title]') ||
                     node.querySelector('[class*="border-interface"]') ||
                     (node.textContent && node.textContent.includes('Download All'))
@@ -545,7 +526,7 @@ function setupPanelObserver() {
 
     observer.observe(document.body, { childList: true, subtree: true });
 
-    // Also inject on initial load after delays (panel may already be open)
+    // Also inject on initial load after delays (panel/dialog may already be open)
     setTimeout(scheduleInject, 2000);
     setTimeout(scheduleInject, 5000);
 }
@@ -554,7 +535,7 @@ function setupPanelObserver() {
 app.registerExtension({
     name: "ComfyUI.AutoModelDownloader",
     async setup() {
-        console.log("[AutoModelDownloader] Extension setup — v3.0.0 explicit server buttons");
+        console.log("[AutoModelDownloader] Extension setup — v3.1.0 DOM-agnostic buttons");
         setupPanelObserver();
         console.log("[AutoModelDownloader] Ready. Server download buttons will appear next to missing models.");
     }
