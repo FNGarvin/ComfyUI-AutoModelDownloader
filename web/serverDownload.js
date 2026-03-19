@@ -2,19 +2,17 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 // ComfyUI.AutoModelDownloader Extension
-// Version: 2.1.0 — Fixed directory resolution for server-side downloads
-//
-// v2.0.0 bug: "Download All" and individual downloads put models in wrong
-// directories (e.g. checkpoints/ instead of diffusion_models/) because:
-//   1. "Download All" doesn't click individual buttons, so
-//      lastClickedDirectory from DOM button tracking was never set.
-//   2. guessDirectoryFromUrl() defaulted .safetensors to "checkpoints".
+// Version: 2.2.0 — Fixed first-model browser fallback during "Download All"
 //
 // v2.1.0 fix: Build a filename→directory lookup by scraping the missing
-// model panel's category headers BEFORE any downloads start. The panel
-// renders category groups with headers like "diffusion_models (5)" and
-// model rows with title="model.safetensors" underneath.
-console.log('[AutoModelDownloader] v2.1.0');
+// model panel's category headers BEFORE any downloads start.
+//
+// v2.2.0 fix: "Download All" first model fell through to browser download
+// because the capture-phase listener that pre-builds the directory map
+// could fire after Vue's handler already called downloadModel() for the
+// first item. Fix: build the map eagerly whenever the missing-model panel
+// DOM appears (MutationObserver), so it's always warm before any click.
+console.log('[AutoModelDownloader] v2.2.0');
 
 // ── State ──
 const downloadStates = new Map();
@@ -297,6 +295,15 @@ function setupButtonObserver() {
 function processNewNode(root) {
     if (!root || !root.querySelectorAll) return;
 
+    // Eagerly rebuild the directory map whenever new DOM content appears
+    // that looks like the missing-model panel. This ensures the map is warm
+    // BEFORE any download button is clicked — fixing the race where the
+    // first "Download All" model fell through to browser download.
+    const hasTitlePs = root.querySelector ? root.querySelector('p[title]') : null;
+    if (hasTitlePs) {
+        buildModelDirectoryMap();
+    }
+
     const buttons = root.querySelectorAll('button');
     for (const btn of buttons) {
         if (btn.dataset.autoModelPatched) continue;
@@ -439,7 +446,7 @@ window.addEventListener('serverDownloadUpdate', (event) => {
 app.registerExtension({
     name: "ComfyUI.AutoModelDownloader",
     async setup() {
-        console.log("[AutoModelDownloader] Extension setup — v2.1.0 with directory map fix");
+        console.log("[AutoModelDownloader] Extension setup — v2.2.0 with eager directory map");
         setupButtonObserver();
         console.log("[AutoModelDownloader] Ready. Browser model downloads will be intercepted and routed to server.");
     }
