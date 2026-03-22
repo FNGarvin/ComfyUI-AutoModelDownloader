@@ -457,10 +457,12 @@ function setupDialogObserver() {
             if (mutation.addedNodes.length) {
                 mutation.addedNodes.forEach(node => {
                     if (node.nodeType === Node.ELEMENT_NODE) {
-                        // Check if this node or its descendants contain the missing models dialog
+                        // Check for both old (.comfy-missing-models) and new (#global-missing-models-warning) dialog
                         const hasDialog = node.querySelector && (
                             node.querySelector('.comfy-missing-models') ||
-                            node.classList?.contains('comfy-missing-models')
+                            node.classList?.contains('comfy-missing-models') ||
+                            node.querySelector('#global-missing-models-warning') ||
+                            node.id === 'global-missing-models-warning'
                         );
 
                         if (hasDialog) {
@@ -484,17 +486,86 @@ function setupDialogObserver() {
     console.log('[AutoModelDownloader] Observer active');
 }
 
+function findModelListContainer() {
+    // Try new dialog structure first (ComfyUI v1.x with PrimeVue dialogs)
+    const newDialog = document.querySelector('#global-missing-models-warning');
+    if (newDialog) {
+        // The model list is the scrollable div inside the dialog content
+        const dialog = newDialog.closest('.p-dialog');
+        if (dialog) {
+            const modelList = dialog.querySelector('.bg-secondary-background');
+            if (modelList) return { container: modelList, type: 'new' };
+        }
+    }
+    // Fall back to legacy dialog structure
+    const legacy = document.querySelector('.comfy-missing-models');
+    if (legacy) return { container: legacy, type: 'legacy' };
+    return null;
+}
+
+function parseModelItems(container, type) {
+    const models = [];
+    if (type === 'new') {
+        // New structure: div rows with button[title="https://..."] for the download URL
+        const rows = container.querySelectorAll(':scope > .flex.items-center.justify-between');
+        rows.forEach(row => {
+            const nameEl = row.querySelector('span.text-foreground[title]');
+            const downloadBtn = row.querySelector('button[title^="http"]');
+            if (!nameEl || !downloadBtn) return;
+
+            const filename = nameEl.getAttribute('title');
+            const url = downloadBtn.getAttribute('title');
+
+            // Extract model type from badge text
+            const badge = row.querySelector('span.uppercase');
+            const modelType = badge ? badge.textContent.trim().toLowerCase().replace(' ', '_') : '';
+
+            // Map model type to directory name
+            const typeToDir = {
+                'diffusion': 'diffusion_models',
+                'checkpoint': 'checkpoints',
+                'lora': 'loras',
+                'vae': 'vae',
+                'text_encoder': 'text_encoders',
+                'clip': 'clip',
+                'clip_vision': 'clip_vision',
+                'controlnet': 'controlnet',
+                'upscale_models': 'upscale_models',
+                'latent_upscale_models': 'latent_upscale_models',
+                'unet': 'unet',
+                'embeddings': 'embeddings',
+            };
+            const directory = typeToDir[modelType] || modelType || 'checkpoints';
+
+            models.push({ url, directory, filename, row });
+        });
+    } else {
+        // Legacy structure: li.p-listbox-option with title elements
+        const items = container.querySelectorAll('.p-listbox-option');
+        items.forEach(item => {
+            const labelElement = item.querySelector('[title]');
+            if (!labelElement) return;
+            const label = labelElement.textContent.trim();
+            const url = labelElement.getAttribute('title');
+            const parts = label.split('/').map(p => p.trim());
+            if (parts.length !== 2) return;
+            models.push({ url, directory: parts[0], filename: parts[1], row: item });
+        });
+    }
+    return models;
+}
+
 function injectServerDownloadButtons() {
     console.log('[AutoModelDownloader] injectServerDownloadButtons called');
 
-    // Find the missing models listbox
-    const listbox = document.querySelector('.comfy-missing-models');
-    if (!listbox) {
+    const result = findModelListContainer();
+    if (!result) {
         console.log('[AutoModelDownloader] Missing models listbox not found');
         return;
     }
 
-    console.log('[AutoModelDownloader] Found .comfy-missing-models listbox');
+    const { container: listbox, type: dialogType } = result;
+    console.log(`[AutoModelDownloader] Found model list (${dialogType} dialog)`);
 
     // Check if we already added our UI
     if (document.querySelector('.server-download-all-btn')) {
@@ -502,61 +573,40 @@ function injectServerDownloadButtons() {
         return;
     }
 
-    const listItems = listbox.querySelectorAll('.p-listbox-option');
-    console.log(`[AutoModelDownloader] Found ${listItems.length} list items`);
+    const models = parseModelItems(listbox, dialogType);
+    console.log(`[AutoModelDownloader] Found ${models.length} models`);
 
-    if (listItems.length === 0) {
-        console.log('[AutoModelDownloader] No list items found');
+    if (models.length === 0) {
+        console.log('[AutoModelDownloader] No models found');
         return;
     }
 
-    // Add "Download All" button before the listbox
+    // Add "Download All to Server" button before the listbox
     const downloadAllContainer = document.createElement('div');
-    downloadAllContainer.style.cssText = 'margin-bottom: 16px; display: flex; justify-content: center;';
+    downloadAllContainer.style.cssText = 'margin-bottom: 8px; display: flex; justify-content: center;';
 
     const downloadAllBtn = document.createElement('button');
-    downloadAllBtn.className = 'server-download-all-btn p-button p-component p-button-sm';
+    downloadAllBtn.className = 'server-download-all-btn';
     downloadAllBtn.type = 'button';
-    downloadAllBtn.style.cssText = 'background: #2196F3; color: white; border: none; padding: 10px 20px; font-weight: 600;';
+    downloadAllBtn.style.cssText = 'background: #2196F3; color: white; border: none; padding: 8px 16px; font-weight: 600; border-radius: 6px; cursor: pointer; font-size: 13px;';
 
     const downloadAllLabel = document.createElement('span');
-    downloadAllLabel.className = 'p-button-label';
-    downloadAllLabel.textContent = `Download All Models (${listItems.length})`;
+    downloadAllLabel.textContent = `Download All to Server (${models.length})`;
     downloadAllBtn.appendChild(downloadAllLabel);
 
     downloadAllBtn.onclick = async (e) => {
         e.stopPropagation();
         downloadAllBtn.disabled = true;
+        downloadAllBtn.style.opacity = '0.6';
         downloadAllLabel.textContent = 'Starting downloads...';
-
-        // Collect all models
-        downloadQueue = [];
-        const models = [];
-
-        listItems.forEach((item) => {
-            const labelElement = item.querySelector('[title]');
-            if (!labelElement) return;
-
-            const label = labelElement.textContent.trim();
-            const url = labelElement.getAttribute('title');
-            const parts = label.split('/').map(p => p.trim());
-            if (parts.length !== 2) return;
-
-            const directory = parts[0];
-            const filename = parts[1];
-
-            models.push({ url, directory, filename });
-        });
 
         downloadQueue = [...models];
         totalDownloads = models.length;
         completedDownloads = 0;
         isDownloadingAll = true;
 
-        // Create progress area
         createProgressArea(listbox);
 
-        // Start first download
         if (downloadQueue.length > 0) {
             processDownloadQueue();
         }
@@ -565,56 +615,22 @@ function injectServerDownloadButtons() {
     downloadAllContainer.appendChild(downloadAllBtn);
     listbox.parentElement.insertBefore(downloadAllContainer, listbox);
 
-    listItems.forEach((item, index) => {
-        console.log(`[AutoModelDownloader] Processing item ${index + 1}`);
+    models.forEach((model, index) => {
+        const item = model.row;
+        console.log(`[AutoModelDownloader] Processing item ${index + 1}: ${model.filename}`);
 
-        // Check if we already added the button
         if (item.querySelector('.server-download-btn')) {
-            console.log(`[AutoModelDownloader] Item ${index + 1} already has server download button, skipping`);
             return;
         }
 
-        // The HTML structure is:
-        // <li class="p-listbox-option">
-        //   <div class="flex flex-row items-center gap-2"> <- main container
-        //     <div> model info </div>
-        //     <div> <button>Download</button> </div>
-        //     <div> <button>Copy URL</button> </div>
-        //   </div>
-        // </li>
+        // Find the container for the download button (works for both dialog types)
+        const mainContainer = dialogType === 'new'
+            ? item.querySelector('.flex.shrink-0.items-center') || item
+            : item.querySelector('.flex.flex-row.items-center.gap-2') || item;
 
-        // Find the main flex container
-        const mainContainer = item.querySelector('.flex.flex-row.items-center.gap-2');
-        if (!mainContainer) {
-            console.log('[AutoModelDownloader] Main flex container not found');
-            return;
-        }
-
-        console.log('[AutoModelDownloader] Found main container');
-
-        // We'll create a new div for our button (following the same pattern)
         const buttonWrapper = document.createElement('div');
 
-        // Get model info from the item
-        const labelElement = item.querySelector('[title]');
-        if (!labelElement) {
-            console.log('[AutoModelDownloader] No title element found');
-            return;
-        }
-
-        const label = labelElement.textContent.trim();
-        const url = labelElement.getAttribute('title');
-        console.log(`[AutoModelDownloader] Model: ${label}, URL: ${url}`);
-
-        // Parse "checkpoints / model.safetensors" format
-        const parts = label.split('/').map(p => p.trim());
-        if (parts.length !== 2) {
-            console.log(`[AutoModelDownloader] Could not parse label format: ${label}`);
-            return;
-        }
-
-        const directory = parts[0];
-        const filename = parts[1];
+        const { url, directory, filename } = model;
         const download_id = `${directory}/${filename}`;
         console.log(`[AutoModelDownloader] Creating button for ${download_id}`);
 
